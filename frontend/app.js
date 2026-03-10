@@ -1,23 +1,19 @@
 /* ── API Configuration ──────────────────────────────────────── */
-// Auto-detect: use same hostname as the page, port 8000 for API
 var API = window.location.protocol + "//" + window.location.hostname + ":8000";
 
 /* ── State ─────────────────────────────────────────────────── */
 var state = {
   currentView: "dashboard",
   markets: [],
-  opportunities: [],
-  positions: [],
-  analytics: null,
-  pnlChart: null,
-  lastScan: null,
+  equityChart: null,
+  accuracyChart: null,
 };
 
 /* ── Theme Toggle ──────────────────────────────────────────── */
 (function () {
   var t = document.querySelector("[data-theme-toggle]");
   var r = document.documentElement;
-  var d = "dark"; // Default to dark for trading terminal
+  var d = "dark";
   r.setAttribute("data-theme", d);
   if (t) {
     t.addEventListener("click", function () {
@@ -34,39 +30,35 @@ var state = {
 /* ── View Switching ────────────────────────────────────────── */
 function switchView(view) {
   state.currentView = view;
-
-  // Hide all views
-  document.querySelectorAll(".view-section").forEach(function (s) {
-    s.classList.remove("active");
-  });
-
-  // Show target
+  document.querySelectorAll(".view-section").forEach(function (s) { s.classList.remove("active"); });
   var target = document.getElementById("view-" + view);
   if (target) target.classList.add("active");
-
-  // Update sidebar active
   document.querySelectorAll(".sidebar-nav button").forEach(function (b) {
     b.classList.toggle("active", b.getAttribute("data-view") === view);
   });
-
-  // Update header
   var titles = {
-    dashboard: "Dashboard",
-    scanner: "Market Scanner",
-    opportunities: "Opportunities",
-    positions: "Positions",
-    strategies: "Strategy Analysis",
-    settings: "Settings",
+    "dashboard": "Simulation Dashboard",
+    "active-bets": "Active Bets",
+    "history": "Bet History",
+    "scanner": "Market Scanner",
+    "learning": "Learning & Confidence",
+    "strategies": "Strategy Performance",
+    "cycles": "Cycle Log",
+    "settings": "Settings",
   };
   document.getElementById("pageTitle").textContent = titles[view] || view;
 
-  // Load data for view
+  if (view === "dashboard") loadDashboard();
+  if (view === "active-bets") loadActiveBets();
+  if (view === "history") loadHistory("all");
   if (view === "scanner") loadMarkets();
-  if (view === "positions") loadPositions("open");
-  if (view === "strategies") loadStrategies();
+  if (view === "learning") loadLearning();
+  if (view === "strategies") loadSimStrategies();
+  if (view === "cycles") { loadCycles(); loadDecisions(); }
+  if (view === "settings") loadSimSettings();
 }
 
-/* ── API Calls ─────────────────────────────────────────────── */
+/* ── API Helpers ───────────────────────────────────────────── */
 async function apiGet(path) {
   try {
     var resp = await fetch(API + path);
@@ -83,7 +75,7 @@ async function apiPost(path, body) {
     var resp = await fetch(API + path, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      body: body ? JSON.stringify(body) : undefined,
     });
     if (!resp.ok) throw new Error("HTTP " + resp.status);
     return await resp.json();
@@ -93,24 +85,15 @@ async function apiPost(path, body) {
   }
 }
 
-async function apiPatch(path, body) {
-  try {
-    var resp = await fetch(API + path, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    return await resp.json();
-  } catch (e) {
-    console.error("API error:", path, e);
-    return null;
-  }
-}
-
 /* ── Dashboard ─────────────────────────────────────────────── */
 async function loadDashboard() {
-  var data = await apiGet("/api/analytics/summary");
-  if (!data) {
+  var [status, perf, bankrollData] = await Promise.all([
+    apiGet("/api/sim/status"),
+    apiGet("/api/sim/performance"),
+    apiGet("/api/sim/bankroll"),
+  ]);
+
+  if (!status) {
     document.getElementById("engineStatus").textContent = "Offline";
     document.getElementById("statusDot").style.background = "var(--color-error)";
     return;
@@ -118,81 +101,99 @@ async function loadDashboard() {
 
   document.getElementById("engineStatus").textContent = "Engine Online";
   document.getElementById("statusDot").style.background = "var(--color-success)";
-  state.analytics = data;
+
+  // Bankroll hero
+  var bal = status.bankroll.balance || 10000;
+  var initial = status.bankroll.total_deposited || 10000;
+  var pnlVal = bal - initial;
+  var pnlPct = (pnlVal / initial * 100);
+  document.getElementById("bankrollValue").textContent = formatMoney(bal);
+  var heroEl = document.getElementById("bankrollHero");
+  heroEl.className = "bankroll-hero " + (pnlVal > 0 ? "positive" : pnlVal < 0 ? "negative" : "");
+  var deltaText = (pnlVal >= 0 ? "+" : "") + formatMoney(pnlVal) + " (" + pnlPct.toFixed(2) + "%)";
+  document.getElementById("bankrollDelta").textContent = pnlVal !== 0 ? deltaText : "Starting balance";
 
   // KPIs
-  var pnlEl = document.getElementById("kpi-total-pnl");
-  var pnlVal = data.total_pnl;
-  pnlEl.textContent = formatUSD(pnlVal);
-  pnlEl.className = "kpi-value " + (pnlVal > 0 ? "positive" : pnlVal < 0 ? "negative" : "neutral");
+  setKPI("kpi-pnl", formatMoney(status.total_pnl), status.total_pnl,
+    "Realized: " + formatMoney(status.realized_pnl) + " | Unrealized: " + formatMoney(status.unrealized_pnl));
+  setKPI("kpi-winrate", status.win_rate + "%", status.win_rate >= 55 ? 1 : status.win_rate > 0 ? 0 : 0,
+    status.wins + "W / " + status.losses + "L");
 
-  var deltaEl = document.getElementById("kpi-total-pnl-delta");
-  deltaEl.textContent = "Realized: " + formatUSD(data.realized_pnl) + " | Unrealized: " + formatUSD(data.unrealized_pnl);
-  deltaEl.className = "kpi-delta " + (pnlVal > 0 ? "up" : pnlVal < 0 ? "down" : "flat");
+  if (perf) {
+    setKPI("kpi-roi", perf.roi + "%", perf.roi, "Sharpe: " + (perf.sharpe_ratio || "—"));
+  }
+  setKPI("kpi-open", status.active_bets, 0,
+    formatMoney(status.bankroll.at_risk || 0) + " at risk");
 
-  document.getElementById("kpi-open-positions").textContent = data.open_positions;
-  document.getElementById("kpi-exposure").textContent = formatUSD(data.total_exposure) + " exposure";
+  // Equity chart
+  if (bankrollData && bankrollData.history) {
+    updateEquityChart(bankrollData.history, initial);
+  }
 
-  var wrEl = document.getElementById("kpi-win-rate");
-  wrEl.textContent = data.win_rate + "%";
-  wrEl.className = "kpi-value " + (data.win_rate >= 55 ? "positive" : data.win_rate > 0 ? "neutral" : "neutral");
-  document.getElementById("kpi-record").textContent = data.wins + "W / " + data.losses + "L";
+  // Recent activity
+  var bets = await apiGet("/api/sim/bets?limit=10");
+  if (bets && bets.bets && bets.bets.length > 0) {
+    renderRecentActivity(bets.bets);
+  }
 
-  // P&L Chart
-  updatePnlChart(data.daily_pnl);
-
-  // Load recent positions
-  var posData = await apiGet("/api/positions?status=open");
-  if (posData && posData.positions.length > 0) {
-    renderPositionsTable("recentPositions", posData.positions.slice(0, 5), true);
+  // Engine status
+  if (status.last_cycle) {
+    var lc = status.last_cycle;
+    document.getElementById("lastCycleTime").textContent = formatTime(lc.completed_at || lc.started_at);
+    document.getElementById("lastScanned").textContent = lc.markets_scanned || 0;
+    document.getElementById("lastBetsPlaced").textContent = lc.bets_placed || 0;
+    document.getElementById("lastResolved").textContent = lc.bets_resolved || 0;
   }
 }
 
-function updatePnlChart(dailyPnl) {
-  var ctx = document.getElementById("pnlChart");
-  if (!ctx) return;
-
-  if (state.pnlChart) {
-    state.pnlChart.destroy();
+function setKPI(id, value, direction, detail) {
+  var valEl = document.getElementById(id);
+  valEl.textContent = value;
+  valEl.className = "kpi-value " + (direction > 0 ? "positive" : direction < 0 ? "negative" : "neutral");
+  var detailId = id + "-detail";
+  if (!document.getElementById(detailId)) detailId = id.replace("kpi-", "kpi-") + "-detail";
+  // find sibling kpi-delta
+  var detailEl = valEl.nextElementSibling;
+  if (detailEl && detail) {
+    detailEl.textContent = detail;
+    detailEl.className = "kpi-delta " + (direction > 0 ? "up" : direction < 0 ? "down" : "flat");
   }
+}
+
+function updateEquityChart(history, initial) {
+  var ctx = document.getElementById("equityChart");
+  if (!ctx) return;
+  if (state.equityChart) state.equityChart.destroy();
 
   var labels = [];
   var values = [];
-  var cumulative = 0;
 
-  if (dailyPnl && dailyPnl.length > 0) {
-    dailyPnl.forEach(function (d) {
-      labels.push(d.day);
-      cumulative += d.daily_pnl;
-      values.push(cumulative);
+  if (history.length > 0) {
+    history.forEach(function (h) {
+      labels.push(formatTime(h.recorded_at));
+      values.push(h.balance);
     });
   } else {
-    // Demo data
-    var now = new Date();
-    for (var i = 29; i >= 0; i--) {
-      var date = new Date(now);
-      date.setDate(date.getDate() - i);
-      labels.push(date.toISOString().slice(5, 10));
-      values.push(0);
-    }
+    labels.push("Start");
+    values.push(initial || 10000);
   }
 
-  var chartColor = getComputedStyle(document.documentElement).getPropertyValue("--color-primary").trim();
-  var surfaceColor = getComputedStyle(document.documentElement).getPropertyValue("--color-surface").trim();
-  var textMuted = getComputedStyle(document.documentElement).getPropertyValue("--color-text-faint").trim();
+  var chartColor = getCSS("--color-primary");
+  var surfaceColor = getCSS("--color-surface");
+  var textMuted = getCSS("--color-text-faint");
 
-  state.pnlChart = new Chart(ctx, {
+  state.equityChart = new Chart(ctx, {
     type: "line",
     data: {
       labels: labels,
       datasets: [{
-        label: "Cumulative P&L",
+        label: "Bankroll",
         data: values,
         borderColor: chartColor,
         backgroundColor: chartColor + "20",
         fill: true,
         tension: 0.4,
-        pointRadius: 0,
+        pointRadius: values.length > 20 ? 0 : 3,
         pointHitRadius: 10,
         borderWidth: 2,
       }],
@@ -210,73 +211,206 @@ function updatePnlChart(dailyPnl) {
           borderWidth: 1,
           padding: 12,
           displayColors: false,
-          callbacks: {
-            label: function (context) {
-              return formatUSD(context.parsed.y);
-            },
-          },
+          callbacks: { label: function (c) { return formatMoney(c.parsed.y); } },
         },
       },
       scales: {
-        x: {
-          grid: { display: false },
-          ticks: { color: textMuted, font: { size: 11 }, maxTicksLimit: 8 },
-          border: { display: false },
-        },
-        y: {
-          grid: { color: textMuted + "15" },
-          ticks: {
-            color: textMuted,
-            font: { size: 11 },
-            callback: function (v) { return "$" + v.toFixed(0); },
-          },
-          border: { display: false },
-        },
+        x: { grid: { display: false }, ticks: { color: textMuted, font: { size: 10 }, maxTicksLimit: 8 }, border: { display: false } },
+        y: { grid: { color: textMuted + "15" }, ticks: { color: textMuted, font: { size: 10 }, callback: function (v) { return "$" + v.toLocaleString(); } }, border: { display: false } },
       },
-      interaction: {
-        intersect: false,
-        mode: "index",
-      },
+      interaction: { intersect: false, mode: "index" },
     },
   });
+}
+
+function renderRecentActivity(bets) {
+  var container = document.getElementById("recentActivity");
+  container.innerHTML = bets.map(function (b) {
+    var icon, color;
+    if (b.status === "open") { icon = "&#9679;"; color = "var(--color-primary)"; }
+    else if (b.status === "won") { icon = "&#10003;"; color = "var(--color-success)"; }
+    else { icon = "&#10007;"; color = "var(--color-error)"; }
+
+    var pnl = b.status === "open" ? b.unrealized_pnl : b.realized_pnl;
+    var pnlStr = (pnl >= 0 ? "+" : "") + formatMoney(pnl);
+    var pnlColor = pnl > 0 ? "var(--color-success)" : pnl < 0 ? "var(--color-error)" : "var(--color-text-muted)";
+
+    return '<div class="activity-item" onclick="showBetDetail(' + b.id + ')">' +
+      '<div class="activity-icon" style="color:' + color + '">' + icon + '</div>' +
+      '<div class="activity-body">' +
+        '<div class="activity-text">' + escapeHtml(truncate(b.question, 60)) + '</div>' +
+        '<div class="activity-meta">' + b.side + ' @ ' + centsStr(b.entry_price) + ' &middot; ' + formatMoney(b.size) + ' &middot; ' + formatTime(b.placed_at) + '</div>' +
+      '</div>' +
+      '<div class="activity-pnl mono" style="color:' + pnlColor + '">' + pnlStr + '</div>' +
+    '</div>';
+  }).join("");
+}
+
+/* ── Active Bets ───────────────────────────────────────────── */
+async function loadActiveBets() {
+  var data = await apiGet("/api/sim/bets?status=open&limit=100");
+  if (!data) return;
+  document.getElementById("activeBetsCount").textContent = data.total + " open";
+  var tbody = document.getElementById("activeBetsBody");
+
+  if (!data.bets || data.bets.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="10" class="table-empty">No active bets</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = data.bets.map(function (b) {
+    var upnl = b.unrealized_pnl || 0;
+    var pnlColor = upnl > 0 ? "var(--color-success)" : upnl < 0 ? "var(--color-error)" : "var(--color-text-muted)";
+    var timeOpen = timeSince(b.placed_at);
+    return '<tr onclick="showBetDetail(' + b.id + ')" style="cursor:pointer">' +
+      '<td><div class="market-question">' + escapeHtml(truncate(b.question, 50)) + '</div></td>' +
+      '<td><span class="badge badge-' + b.side.toLowerCase() + '">' + b.side + '</span></td>' +
+      '<td class="mono">' + centsStr(b.entry_price) + '</td>' +
+      '<td class="mono">' + centsStr(b.current_price) + '</td>' +
+      '<td class="mono">' + formatMoney(b.size) + '</td>' +
+      '<td class="mono" style="color:' + pnlColor + ';font-weight:600">' + (upnl >= 0 ? "+" : "") + formatMoney(upnl) + '</td>' +
+      '<td class="mono">' + ((b.edge || 0) * 100).toFixed(1) + '%</td>' +
+      '<td><span class="badge badge-' + b.confidence + '">' + b.confidence + '</span></td>' +
+      '<td class="text-xs text-muted">' + escapeHtml(b.strategy || "") + '</td>' +
+      '<td class="text-xs text-muted">' + timeOpen + '</td>' +
+    '</tr>';
+  }).join("");
+}
+
+/* ── Bet History ───────────────────────────────────────────── */
+async function loadHistory(status) {
+  // Update tabs
+  document.querySelectorAll("#historyTabs .tab-filter").forEach(function (btn) {
+    btn.classList.toggle("active", btn.textContent.toLowerCase() === status);
+  });
+
+  var url = "/api/sim/bets?limit=100";
+  if (status !== "all") url += "&status=" + status;
+  var data = await apiGet(url);
+  if (!data) return;
+
+  // Filter to only resolved for history (unless 'all' which includes open)
+  var bets = data.bets;
+  if (status === "all") {
+    bets = bets.filter(function (b) { return b.status !== "open"; });
+  }
+
+  document.getElementById("historyCount").textContent = bets.length + " bets";
+  var tbody = document.getElementById("historyBody");
+
+  if (bets.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="10" class="table-empty">No resolved bets</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = bets.map(function (b) {
+    var pnl = b.realized_pnl || 0;
+    var pnlColor = pnl > 0 ? "var(--color-success)" : pnl < 0 ? "var(--color-error)" : "var(--color-text-muted)";
+    var statusClass = b.status === "won" ? "badge-high" : b.status === "lost" ? "badge-danger" : "badge-none";
+    return '<tr onclick="showBetDetail(' + b.id + ')" style="cursor:pointer">' +
+      '<td><div class="market-question">' + escapeHtml(truncate(b.question, 50)) + '</div></td>' +
+      '<td><span class="badge badge-' + b.side.toLowerCase() + '">' + b.side + '</span></td>' +
+      '<td class="mono">' + centsStr(b.entry_price) + '</td>' +
+      '<td class="mono">' + centsStr(b.outcome_price) + '</td>' +
+      '<td class="mono">' + formatMoney(b.size) + '</td>' +
+      '<td class="mono" style="color:' + pnlColor + ';font-weight:600">' + (pnl >= 0 ? "+" : "") + formatMoney(pnl) + '</td>' +
+      '<td class="mono">' + ((b.edge || 0) * 100).toFixed(1) + '%</td>' +
+      '<td class="text-xs text-muted">' + escapeHtml(b.strategy || "") + '</td>' +
+      '<td><span class="badge ' + statusClass + '">' + b.status + '</span></td>' +
+      '<td class="text-xs text-muted">' + formatDate(b.resolved_at || b.placed_at) + '</td>' +
+    '</tr>';
+  }).join("");
+}
+
+/* ── Bet Detail Modal ──────────────────────────────────────── */
+async function showBetDetail(id) {
+  var data = await apiGet("/api/sim/bets/" + id);
+  if (!data || !data.bet) return;
+  var b = data.bet;
+
+  document.getElementById("modalTitle").textContent = "Bet #" + b.id;
+  var pnl = b.status === "open" ? b.unrealized_pnl : b.realized_pnl;
+  var pnlColor = pnl > 0 ? "var(--color-success)" : pnl < 0 ? "var(--color-error)" : "var(--color-text-muted)";
+
+  var signals = b.signals || [];
+  if (typeof signals === "string") { try { signals = JSON.parse(signals); } catch (e) { signals = []; } }
+
+  document.getElementById("modalBody").innerHTML =
+    '<div class="modal-section">' +
+      '<div class="modal-question">' + escapeHtml(b.question) + '</div>' +
+    '</div>' +
+    '<div class="modal-grid">' +
+      modalStat("Side", '<span class="badge badge-' + b.side.toLowerCase() + '">' + b.side + '</span>') +
+      modalStat("Status", '<span class="badge badge-' + (b.status === "won" ? "high" : b.status === "lost" ? "danger" : "low") + '">' + b.status + '</span>') +
+      modalStat("Entry Price", centsStr(b.entry_price)) +
+      modalStat("Current Price", centsStr(b.current_price)) +
+      modalStat("Size", formatMoney(b.size)) +
+      modalStat("Shares", (b.shares || 0).toFixed(2)) +
+      modalStat("P&L", '<span style="color:' + pnlColor + ';font-weight:700">' + (pnl >= 0 ? "+" : "") + formatMoney(pnl) + '</span>') +
+      modalStat("Edge", ((b.edge || 0) * 100).toFixed(1) + '%') +
+      modalStat("Our Probability", ((b.our_probability || 0) * 100).toFixed(1) + '%') +
+      modalStat("Market Probability", ((b.market_probability || 0) * 100).toFixed(1) + '%') +
+      modalStat("Confidence", b.confidence || "—") +
+      modalStat("Strategy", b.strategy || "—") +
+      modalStat("Category", b.category || "—") +
+      modalStat("Placed", formatTime(b.placed_at)) +
+      (b.resolved_at ? modalStat("Resolved", formatTime(b.resolved_at)) : "") +
+      (b.resolution_source ? modalStat("Resolution", b.resolution_source) : "") +
+    '</div>' +
+    '<div class="modal-section">' +
+      '<div class="modal-label">Reasoning</div>' +
+      '<div class="modal-reasoning">' + escapeHtml(b.reasoning || "No reasoning recorded") + '</div>' +
+    '</div>' +
+    (signals.length > 0 ? '<div class="modal-section"><div class="modal-label">Signals</div><div class="signal-pills">' +
+      signals.map(function (s) {
+        var type = typeof s === "string" ? s : s;
+        return '<span class="signal-pill" data-type="' + type + '">' + type.replace(/_/g, " ") + '</span>';
+      }).join("") + '</div></div>' : '');
+
+  document.getElementById("betModal").classList.add("active");
+}
+
+function modalStat(label, value) {
+  return '<div class="modal-stat"><span class="modal-stat-label">' + label + '</span><span class="modal-stat-value">' + value + '</span></div>';
+}
+
+function closeBetModal(event) {
+  if (event && event.target !== event.currentTarget) return;
+  document.getElementById("betModal").classList.remove("active");
 }
 
 /* ── Market Scanner ────────────────────────────────────────── */
 async function loadMarkets(category) {
   var params = "?limit=50";
-  if (category && category !== "all") {
-    params += "&category=" + category;
-  }
+  if (category && category !== "all") params += "&category=" + category;
 
-  document.getElementById("marketsBody").innerHTML =
-    '<tr><td colspan="7" style="text-align:center;padding:var(--space-8);color:var(--color-text-muted);">Scanning markets...</td></tr>';
-
+  document.getElementById("marketsBody").innerHTML = '<tr><td colspan="7" class="table-empty">Scanning markets...</td></tr>';
   var data = await apiGet("/api/markets" + params);
   if (!data) {
-    document.getElementById("marketsBody").innerHTML =
-      '<tr><td colspan="7" style="text-align:center;padding:var(--space-8);color:var(--color-error);">Failed to load markets</td></tr>';
+    document.getElementById("marketsBody").innerHTML = '<tr><td colspan="7" class="table-empty" style="color:var(--color-error)">Failed to load</td></tr>';
     return;
   }
 
   state.markets = data.markets;
-  document.getElementById("marketCount").textContent = data.total + " markets loaded";
+  document.getElementById("marketCount").textContent = data.total + " markets";
   renderMarketsTable(data.markets);
 }
 
 function renderMarketsTable(markets) {
   var tbody = document.getElementById("marketsBody");
   if (!markets || markets.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:var(--space-8);color:var(--color-text-muted);">No markets found</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="table-empty">No markets found</td></tr>';
     return;
   }
 
   tbody.innerHTML = markets.map(function (m) {
     var edgePct = Math.min(m.edge * 100, 100);
     var signalHtml = (m.signals || []).map(function (s) {
-      return '<span class="signal-pill" data-type="' + s.type + '">' + s.type.replace(/_/g, " ") + "</span>";
+      return '<span class="signal-pill" data-type="' + s.type + '">' + s.type.replace(/_/g, " ") + '</span>';
     }).join("");
+    var isOpportunity = m.edge >= 0.03;
 
-    return '<tr>' +
+    return '<tr class="' + (isOpportunity ? "row-opportunity" : "") + '">' +
       '<td><div class="market-question" title="' + escapeHtml(m.question) + '">' + escapeHtml(m.question) + '</div></td>' +
       '<td class="mono"><span style="color:var(--color-success)">' + (m.yes_price * 100).toFixed(1) + '&cent;</span></td>' +
       '<td class="mono"><span style="color:var(--color-error)">' + (m.no_price * 100).toFixed(1) + '&cent;</span></td>' +
@@ -284,7 +418,7 @@ function renderMarketsTable(markets) {
       '<td><div class="edge-bar"><div class="edge-bar-track"><div class="edge-bar-fill" style="width:' + edgePct + '%"></div></div><span class="mono" style="font-size:var(--text-xs)">' + (m.edge * 100).toFixed(1) + '%</span></div></td>' +
       '<td><span class="badge badge-' + m.confidence + '">' + m.confidence + '</span></td>' +
       '<td><div class="signal-pills">' + signalHtml + '</div></td>' +
-      '</tr>';
+    '</tr>';
   }).join("");
 }
 
@@ -295,187 +429,249 @@ function filterMarkets(category) {
   loadMarkets(category);
 }
 
-/* ── Opportunities ─────────────────────────────────────────── */
-async function runScan() {
-  showToast("Scanning markets for opportunities...", "info");
+/* ── Learning & Confidence ─────────────────────────────────── */
+async function loadLearning() {
+  var [confData, learnData] = await Promise.all([
+    apiGet("/api/sim/confidence"),
+    apiGet("/api/sim/learning"),
+  ]);
 
-  var data = await apiGet("/api/markets/scan?min_edge=0.03&min_volume=500&limit=100");
-  if (!data) {
-    showToast("Scan failed — check connection", "error");
-    return;
+  // Confidence bars
+  var container = document.getElementById("confidenceList");
+  if (confData && confData.categories && confData.categories.length > 0) {
+    container.innerHTML = confData.categories.map(function (c) {
+      var pct = Math.round((c.confidence_score || 0) * 100);
+      var barColor = c.status === "confident" ? "var(--color-success)" :
+                     c.status === "unreliable" ? "var(--color-error)" : "var(--color-primary)";
+      return '<div class="confidence-item">' +
+        '<div class="confidence-header">' +
+          '<span class="confidence-name">' + escapeHtml(c.category || "Unknown") + '</span>' +
+          '<span class="badge badge-' + (c.status === "confident" ? "high" : c.status === "unreliable" ? "danger" : "low") + '">' + c.status + '</span>' +
+        '</div>' +
+        '<div class="progress-bar"><div class="progress-bar-fill" style="width:' + pct + '%;background:' + barColor + '"></div></div>' +
+        '<div class="confidence-stats">' +
+          '<span>' + pct + '% confidence</span>' +
+          '<span>' + c.total_predictions + ' predictions</span>' +
+          '<span>' + c.correct_predictions + ' correct</span>' +
+          '<span>ROI: ' + ((c.roi || 0) * 100).toFixed(1) + '%</span>' +
+        '</div>' +
+      '</div>';
+    }).join("");
   }
 
-  state.opportunities = data.opportunities;
-  state.lastScan = new Date();
-
-  // Update KPI
-  document.getElementById("kpi-signals").textContent = data.opportunities.length;
-  document.getElementById("kpi-signals-detail").textContent =
-    "Scanned " + data.scanned + " markets at " + new Date().toLocaleTimeString();
-
-  showToast("Found " + data.opportunities.length + " opportunities from " + data.scanned + " markets", "success");
-
-  renderOpportunities(data.opportunities);
-
-  // Update dashboard top opportunities
-  renderTopOpportunities(data.opportunities.slice(0, 5));
-}
-
-function renderOpportunities(opps) {
-  var container = document.getElementById("opportunitiesList");
-  document.getElementById("oppCount").textContent = opps.length + " found";
-
-  if (!opps || opps.length === 0) {
-    container.innerHTML = '<div class="empty-state"><p>No opportunities above threshold</p></div>';
-    return;
+  // Accuracy chart
+  if (learnData && learnData.confidence && learnData.confidence.length > 0) {
+    updateAccuracyChart(learnData.confidence);
   }
 
-  container.innerHTML = '<div style="overflow-x: auto;"><table class="data-table"><thead><tr>' +
-    '<th>Market</th><th>Edge</th><th>Confidence</th><th>Side</th><th>Size</th><th>Volume</th><th>Signals</th>' +
-    '</tr></thead><tbody>' +
-    opps.map(function (o) {
-      var signalHtml = (o.signals || []).map(function (s) {
-        return '<span class="signal-pill" data-type="' + s.type + '">' + s.type.replace(/_/g, " ") + "</span>";
-      }).join("");
+  // Learning summary
+  var summary = document.getElementById("learningSummary");
+  if (confData && confData.categories && confData.categories.length > 0) {
+    var good = confData.categories.filter(function (c) { return c.status === "confident"; });
+    var bad = confData.categories.filter(function (c) { return c.status === "unreliable"; });
+    var learning = confData.categories.filter(function (c) { return c.status === "learning"; });
 
-      return '<tr>' +
-        '<td><div class="market-question" title="' + escapeHtml(o.question) + '">' + escapeHtml(o.question) + '</div></td>' +
-        '<td class="mono" style="color:var(--color-primary);font-weight:600">' + (o.edge * 100).toFixed(1) + '%</td>' +
-        '<td><span class="badge badge-' + o.confidence + '">' + o.confidence + '</span></td>' +
-        '<td><span class="badge badge-' + o.recommended_side.toLowerCase() + '">' + o.recommended_side + '</span></td>' +
-        '<td class="mono">' + formatUSD(o.recommended_size) + '</td>' +
-        '<td class="mono">' + formatCompact(o.volume) + '</td>' +
-        '<td><div class="signal-pills">' + signalHtml + '</div></td>' +
-        '</tr>';
-    }).join("") +
-    '</tbody></table></div>';
+    var html = '<div class="learning-grid">';
+    if (good.length > 0) {
+      html += '<div class="learning-card learning-good"><div class="learning-card-title">Strong Categories</div>' +
+        good.map(function (c) { return '<div class="learning-card-item">' + escapeHtml(c.category) + ' — ' + Math.round(c.confidence_score * 100) + '% confidence</div>'; }).join("") + '</div>';
+    }
+    if (bad.length > 0) {
+      html += '<div class="learning-card learning-bad"><div class="learning-card-title">Weak Categories</div>' +
+        bad.map(function (c) { return '<div class="learning-card-item">' + escapeHtml(c.category) + ' — ' + Math.round(c.confidence_score * 100) + '% confidence</div>'; }).join("") + '</div>';
+    }
+    if (learning.length > 0) {
+      html += '<div class="learning-card learning-neutral"><div class="learning-card-title">Still Learning</div>' +
+        learning.map(function (c) { return '<div class="learning-card-item">' + escapeHtml(c.category) + ' — ' + c.total_predictions + ' predictions</div>'; }).join("") + '</div>';
+    }
+    html += '</div>';
+    summary.innerHTML = html;
+  }
 }
 
-function renderTopOpportunities(opps) {
-  var container = document.getElementById("topOpportunities");
-  if (!opps || opps.length === 0) return;
+function updateAccuracyChart(categories) {
+  var ctx = document.getElementById("accuracyChart");
+  if (!ctx) return;
+  if (state.accuracyChart) state.accuracyChart.destroy();
 
-  container.innerHTML = opps.map(function (o) {
-    return '<div style="display:flex;justify-content:space-between;align-items:center;padding:var(--space-3) 0;border-bottom:1px solid var(--color-divider)">' +
-      '<div style="flex:1;min-width:0;margin-right:var(--space-3)"><div class="market-question" style="font-size:var(--text-sm)">' + escapeHtml(o.question) + '</div>' +
-      '<div style="font-size:var(--text-xs);color:var(--color-text-muted);margin-top:2px">' +
-      (o.signals || []).map(function (s) { return s.type.replace(/_/g, " "); }).join(" · ") + '</div></div>' +
-      '<div style="text-align:right;flex-shrink:0"><div class="mono" style="color:var(--color-primary);font-weight:600;font-size:var(--text-sm)">' + (o.edge * 100).toFixed(1) + '% edge</div>' +
-      '<span class="badge badge-' + o.confidence + '" style="margin-top:2px">' + o.confidence + '</span></div></div>';
-  }).join("");
-}
+  var labels = categories.map(function (c) { return truncate(c.category || "?", 15); });
+  var predicted = categories.map(function (c) { return ((c.avg_edge_predicted || 0) * 100).toFixed(1); });
+  var realized = categories.map(function (c) { return ((c.avg_edge_realized || 0) * 100).toFixed(1); });
 
-/* ── Positions ─────────────────────────────────────────────── */
-async function loadPositions(status) {
-  // Update tab
-  var tabs = document.querySelectorAll("#view-positions .tab-filter");
-  tabs.forEach(function (t) {
-    t.classList.toggle("active", t.textContent.toLowerCase() === status);
+  var textMuted = getCSS("--color-text-faint");
+
+  state.accuracyChart = new Chart(ctx, {
+    type: "bar",
+    data: {
+      labels: labels,
+      datasets: [
+        { label: "Predicted Edge", data: predicted, backgroundColor: getCSS("--color-primary") + "80", borderColor: getCSS("--color-primary"), borderWidth: 1 },
+        { label: "Realized Edge", data: realized, backgroundColor: getCSS("--color-success") + "80", borderColor: getCSS("--color-success"), borderWidth: 1 },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { labels: { color: textMuted, font: { size: 11 } } } },
+      scales: {
+        x: { grid: { display: false }, ticks: { color: textMuted, font: { size: 10 } }, border: { display: false } },
+        y: { grid: { color: textMuted + "15" }, ticks: { color: textMuted, font: { size: 10 }, callback: function (v) { return v + "%"; } }, border: { display: false } },
+      },
+    },
   });
-
-  var data = await apiGet("/api/positions?status=" + status);
-  if (!data) return;
-
-  state.positions = data.positions;
-  renderPositionsTable("positionsBody", data.positions);
 }
 
-function renderPositionsTable(containerId, positions, compact) {
-  var tbody = document.getElementById(containerId);
-  if (!positions || positions.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:var(--space-8);color:var(--color-text-muted);">No positions</td></tr>';
-    return;
-  }
-
-  tbody.innerHTML = positions.map(function (p) {
-    var pnlClass = p.pnl > 0 ? "positive" : p.pnl < 0 ? "negative" : "neutral";
-    return '<tr>' +
-      '<td><div class="market-question">' + escapeHtml(p.question || "Market #" + p.market_id) + '</div></td>' +
-      '<td><span class="badge badge-' + p.side.toLowerCase() + '">' + p.side + '</span></td>' +
-      '<td class="mono">' + (p.entry_price * 100).toFixed(1) + '&cent;</td>' +
-      '<td class="mono">' + (p.current_price * 100).toFixed(1) + '&cent;</td>' +
-      '<td class="mono">' + formatUSD(p.size) + '</td>' +
-      '<td class="mono" style="color:var(--color-' + (p.pnl > 0 ? "success" : p.pnl < 0 ? "error" : "text-muted") + ');font-weight:600">' +
-      (p.pnl >= 0 ? "+" : "") + formatUSD(p.pnl) + '</td>' +
-      '<td><span style="font-size:var(--text-xs);color:var(--color-text-muted)">' + escapeHtml(p.strategy || "") + '</span></td>' +
-      '<td>' + (p.status === "open" ?
-        '<button class="btn btn-ghost btn-sm" onclick="closePosition(' + p.id + ', \'won\')">Won</button>' +
-        '<button class="btn btn-ghost btn-sm" onclick="closePosition(' + p.id + ', \'lost\')">Lost</button>'
-        : '<span style="font-size:var(--text-xs);color:var(--color-text-faint)">' + p.status + '</span>') +
-      '</td></tr>';
-  }).join("");
-}
-
-async function closePosition(id, status) {
-  await apiPatch("/api/positions/" + id, { status: status });
-  showToast("Position marked as " + status, status === "won" ? "success" : "error");
-  loadPositions("open");
-  loadDashboard();
-}
-
-/* ── Strategies ────────────────────────────────────────────── */
-async function loadStrategies() {
-  var data = await apiGet("/api/analytics/strategies");
+/* ── Strategy Performance ──────────────────────────────────── */
+async function loadSimStrategies() {
+  var data = await apiGet("/api/sim/strategies");
   if (!data || !data.strategies || data.strategies.length === 0) return;
 
-  var container = document.getElementById("strategiesList");
-  container.innerHTML = '<div style="overflow-x: auto;"><table class="data-table"><thead><tr>' +
-    '<th>Strategy</th><th>Bets</th><th>Wins</th><th>Losses</th><th>Win Rate</th><th>Total P&L</th><th>Status</th>' +
+  var container = document.getElementById("simStrategiesList");
+  container.innerHTML = '<div style="overflow-x:auto"><table class="data-table"><thead><tr>' +
+    '<th>Strategy</th><th>Bets</th><th>Wins</th><th>Losses</th><th>Win Rate</th><th>Total P&L</th><th>Avg Edge</th><th>Status</th>' +
     '</tr></thead><tbody>' +
     data.strategies.map(function (s) {
+      var pnlColor = s.total_pnl > 0 ? "var(--color-success)" : s.total_pnl < 0 ? "var(--color-error)" : "var(--color-text-muted)";
+      var statusClass = s.status === "scaling" ? "scaling" : s.status === "promising" ? "promising" : s.status === "killing" ? "killing" : "exploring";
       return '<tr>' +
         '<td style="font-weight:600">' + escapeHtml(s.name) + '</td>' +
         '<td class="mono">' + s.total_bets + '</td>' +
         '<td class="mono" style="color:var(--color-success)">' + s.wins + '</td>' +
         '<td class="mono" style="color:var(--color-error)">' + s.losses + '</td>' +
-        '<td class="mono">' + s.win_rate + '%</td>' +
-        '<td class="mono" style="color:var(--color-' + (s.total_pnl >= 0 ? "success" : "error") + ')">' + formatUSD(s.total_pnl) + '</td>' +
-        '<td><span class="badge badge-' + (s.status === "scaling" ? "high" : s.status === "promising" ? "medium" : "low") + '">' + s.status + '</span></td>' +
-        '</tr>';
+        '<td class="mono">' + (s.win_rate || 0) + '%</td>' +
+        '<td class="mono" style="color:' + pnlColor + ';font-weight:600">' + formatMoney(s.total_pnl) + '</td>' +
+        '<td class="mono">' + ((s.avg_edge || 0) * 100).toFixed(1) + '%</td>' +
+        '<td><span class="badge badge-' + statusClass + '">' + s.status + '</span></td>' +
+      '</tr>';
     }).join("") +
     '</tbody></table></div>';
 }
 
+/* ── Cycle Log ─────────────────────────────────────────────── */
+async function loadCycles() {
+  var data = await apiGet("/api/sim/cycles?limit=50");
+  if (!data) return;
+  var tbody = document.getElementById("cyclesBody");
+
+  if (!data.cycles || data.cycles.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="9" class="table-empty">No cycles run yet</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = data.cycles.map(function (c) {
+    var duration = "—";
+    if (c.started_at && c.completed_at) {
+      var ms = new Date(c.completed_at) - new Date(c.started_at);
+      duration = (ms / 1000).toFixed(1) + "s";
+    }
+    var pnlColor = (c.cycle_pnl || 0) > 0 ? "var(--color-success)" : (c.cycle_pnl || 0) < 0 ? "var(--color-error)" : "var(--color-text-muted)";
+    var statusClass = c.status === "completed" ? "badge-high" : c.status === "failed" ? "badge-danger" : "badge-low";
+
+    return '<tr>' +
+      '<td class="mono">#' + c.id + '</td>' +
+      '<td class="text-xs">' + formatTime(c.started_at) + '</td>' +
+      '<td class="mono">' + duration + '</td>' +
+      '<td class="mono">' + (c.markets_scanned || 0) + '</td>' +
+      '<td class="mono">' + (c.opportunities_found || 0) + '</td>' +
+      '<td class="mono">' + (c.bets_placed || 0) + '</td>' +
+      '<td class="mono">' + (c.bets_resolved || 0) + '</td>' +
+      '<td class="mono" style="color:' + pnlColor + '">' + formatMoney(c.cycle_pnl || 0) + '</td>' +
+      '<td><span class="badge ' + statusClass + '">' + c.status + '</span></td>' +
+    '</tr>';
+  }).join("");
+}
+
+async function loadDecisions() {
+  var data = await apiGet("/api/sim/decisions?limit=50");
+  if (!data) return;
+  var container = document.getElementById("decisionLog");
+
+  if (!data.decisions || data.decisions.length === 0) {
+    container.innerHTML = '<div class="empty-state"><p>Decisions logged after each cycle</p></div>';
+    return;
+  }
+
+  container.innerHTML = data.decisions.map(function (d) {
+    var icon = d.decision === "bet_placed" ? "&#9679;" : "&#8212;";
+    var color = d.decision === "bet_placed" ? "var(--color-success)" : "var(--color-text-faint)";
+    var details = d.details || {};
+
+    return '<div class="decision-item">' +
+      '<div class="decision-icon" style="color:' + color + '">' + icon + '</div>' +
+      '<div class="decision-body">' +
+        '<div class="decision-action">' +
+          '<span class="badge badge-' + (d.decision === "bet_placed" ? "high" : "none") + '">' + d.decision.replace(/_/g, " ") + '</span>' +
+          '<span class="text-xs text-muted">' + escapeHtml(truncate(d.question || "", 50)) + '</span>' +
+        '</div>' +
+        '<div class="decision-reason text-xs">' + escapeHtml(d.reasoning || "") + '</div>' +
+        (details.side ? '<div class="decision-meta text-xs mono">' + details.side + ' @ ' + ((details.entry_price || 0) * 100).toFixed(1) + '&cent; &middot; $' + (details.size || 0).toFixed(2) + ' &middot; Edge ' + ((details.edge || 0) * 100).toFixed(1) + '%</div>' : '') +
+      '</div>' +
+      '<div class="decision-time text-xs text-muted">' + formatTime(d.created_at) + '</div>' +
+    '</div>';
+  }).join("");
+}
+
+/* ── Run Simulation Cycle ──────────────────────────────────── */
+async function runSimCycle() {
+  var btn = document.getElementById("runCycleBtn");
+  btn.disabled = true;
+  btn.innerHTML = '<svg class="spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg> Running...';
+  showToast("Running simulation cycle...", "info");
+
+  var result = await apiPost("/api/sim/run-cycle");
+  btn.disabled = false;
+  btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> Run Cycle';
+
+  if (result && !result.error) {
+    showToast(
+      "Cycle complete: " + result.markets_scanned + " scanned, " +
+      result.bets_placed + " bets placed, " + result.bets_resolved + " resolved",
+      "success"
+    );
+    loadDashboard();
+  } else {
+    showToast("Cycle failed: " + (result ? result.error : "connection error"), "error");
+  }
+}
+
 /* ── Settings ──────────────────────────────────────────────── */
-async function saveSettings() {
-  var fields = ["max_bet_size", "daily_budget", "min_edge", "min_volume"];
-  for (var i = 0; i < fields.length; i++) {
-    var el = document.getElementById("cfg-" + fields[i]);
-    if (el) {
-      await apiPost("/api/config", { key: fields[i], value: el.value });
-    }
-  }
-  showToast("Settings saved", "success");
-}
-
-async function saveApiConfig() {
-  var fields = ["wallet_address", "polymarket_key", "polymarket_secret", "polymarket_passphrase"];
-  for (var i = 0; i < fields.length; i++) {
-    var el = document.getElementById("cfg-" + fields[i]);
-    if (el && el.value) {
-      await apiPost("/api/config", { key: fields[i], value: el.value });
-    }
-  }
-  showToast("API configuration saved", "success");
-}
-
-async function loadSettings() {
+async function loadSimSettings() {
   var data = await apiGet("/api/config");
   if (!data) return;
   var cfg = data.config || {};
   Object.keys(cfg).forEach(function (key) {
     var el = document.getElementById("cfg-" + key);
-    if (el && cfg[key] && !cfg[key].endsWith("...")) {
-      el.value = cfg[key];
-    }
+    if (el && cfg[key]) el.value = cfg[key];
   });
 }
 
+async function saveSimSettings() {
+  var fields = [
+    "sim_bankroll", "sim_max_bet", "sim_min_bet", "sim_daily_budget",
+    "sim_min_edge", "sim_min_volume", "sim_max_open_positions", "sim_kelly_fraction"
+  ];
+  for (var i = 0; i < fields.length; i++) {
+    var el = document.getElementById("cfg-" + fields[i]);
+    if (el) await apiPost("/api/config", { key: fields[i], value: el.value });
+  }
+  showToast("Settings saved", "success");
+}
+
+async function resetSimulation() {
+  if (!confirm("Reset all simulation data? This will clear all bets, cycles, and learning metrics, and reset the bankroll.")) return;
+  var result = await apiPost("/api/sim/reset");
+  if (result) {
+    showToast("Simulation reset — bankroll: " + formatMoney(result.bankroll), "success");
+    loadDashboard();
+  }
+}
+
 /* ── Utilities ─────────────────────────────────────────────── */
-function formatUSD(v) {
+function formatMoney(v) {
   if (v === null || v === undefined) return "$0.00";
   var n = parseFloat(v);
-  return "$" + Math.abs(n).toFixed(2);
+  var sign = n < 0 ? "-" : "";
+  return sign + "$" + Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 function formatCompact(v) {
@@ -485,11 +681,57 @@ function formatCompact(v) {
   return "$" + n.toFixed(0);
 }
 
+function centsStr(v) {
+  if (!v && v !== 0) return "—";
+  return (parseFloat(v) * 100).toFixed(1) + "\u00A2";
+}
+
 function escapeHtml(s) {
   if (!s) return "";
   var div = document.createElement("div");
   div.textContent = s;
   return div.innerHTML;
+}
+
+function truncate(s, len) {
+  if (!s) return "";
+  return s.length > len ? s.substring(0, len) + "..." : s;
+}
+
+function formatTime(ts) {
+  if (!ts) return "—";
+  try {
+    var d = new Date(ts + (ts.includes("Z") || ts.includes("+") ? "" : "Z"));
+    return d.toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  } catch (e) { return ts; }
+}
+
+function formatDate(ts) {
+  if (!ts) return "—";
+  try {
+    var d = new Date(ts + (ts.includes("Z") || ts.includes("+") ? "" : "Z"));
+    return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  } catch (e) { return ts; }
+}
+
+function timeSince(ts) {
+  if (!ts) return "—";
+  try {
+    var d = new Date(ts + (ts.includes("Z") || ts.includes("+") ? "" : "Z"));
+    var now = new Date();
+    var sec = Math.floor((now - d) / 1000);
+    if (sec < 60) return sec + "s";
+    var min = Math.floor(sec / 60);
+    if (min < 60) return min + "m";
+    var hr = Math.floor(min / 60);
+    if (hr < 24) return hr + "h";
+    var days = Math.floor(hr / 24);
+    return days + "d";
+  } catch (e) { return "—"; }
+}
+
+function getCSS(prop) {
+  return getComputedStyle(document.documentElement).getPropertyValue(prop).trim();
 }
 
 function showToast(message, type) {
@@ -513,7 +755,6 @@ async function refreshData() {
   btn.disabled = true;
   btn.style.opacity = "0.5";
   await loadDashboard();
-  if (state.currentView === "scanner") await loadMarkets();
   btn.disabled = false;
   btn.style.opacity = "1";
   showToast("Data refreshed", "success");
@@ -522,8 +763,6 @@ async function refreshData() {
 /* ── Initialization ────────────────────────────────────────── */
 async function init() {
   await loadDashboard();
-  await loadSettings();
-  // Auto-refresh every 60s
   setInterval(function () {
     if (state.currentView === "dashboard") loadDashboard();
   }, 60000);
