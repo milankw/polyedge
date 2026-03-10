@@ -1,0 +1,38 @@
+# Example: add this as a new server block or location in your existing nginx config.
+# This proxies PolyEdge through your existing nginx WITHOUT touching port 80.
+#
+# Option A: Subdomain (e.g. polyedge.yourdomain.com)
+# Option B: Path prefix (e.g. yourdomain.com/polyedge/)
+#
+# ─── Option A: Subdomain ────────────────────────────────────────
+
+server {
+    listen 80;
+    server_name polyedge.yourdomain.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+
+# ─── Option B: Path prefix (add inside your existing server block) ───
+
+# location /polyedge/ {
+#     proxy_pass http://127.0.0.1:3000/;
+#     proxy_set_header Host $host;
+#     proxy_set_header X-Real-IP $remote_addr;
+# }
+#
+# location /polyedge/api/ {
+#     proxy_pass http://127.0.0.1:8000/api/;
+#     proxy_set_header Host $host;
+#     proxy_set_header X-Real-IP $remote_addr;
+# }

@@ -1,0 +1,17 @@
+version: "3.8"
+
+services:
+  polyedge:
+    build: .
+    container_name: polyedge
+    restart: unless-stopped
+    ports:
+      - "3000:80"    # Dashboard — change 3000 to any free port you want
+      - "8000:8000"  # API
+    volumes:
+      - polyedge-data:/app/backend  # Persist the SQLite database
+    environment:
+      - PYTHONUNBUFFERED=1
+
+volumes:
+  polyedge-data:
