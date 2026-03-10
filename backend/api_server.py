@@ -606,8 +606,309 @@ def health():
     return {
         "status": "ok",
         "time": datetime.now(timezone.utc).isoformat(),
-        "version": "1.0.0"
+        "version": "2.0.0"
     }
+
+
+# ── New Engine Imports (lazy to avoid circular import at module level) ────
+
+def _get_scanner():
+    from scanner import MarketScanner
+    return MarketScanner()
+
+def _get_trader():
+    from trader import PolymarketTrader
+    return PolymarketTrader.from_config()
+
+def _get_strategy_engine():
+    from strategy_engine import StrategyEngine
+    return StrategyEngine()
+
+def _get_aggregator():
+    from models import ModelAggregator
+    return ModelAggregator()
+
+
+# ── Full Scan Endpoints ─────────────────────────────────────────
+
+@app.get("/api/scan/full")
+async def scan_full(
+    limit: int = Query(100, le=200),
+    min_edge: float = Query(0.03),
+    min_volume: float = Query(500),
+):
+    """Run full scan with model analysis and external data enrichment."""
+    scanner = _get_scanner()
+    return await scanner.full_scan(limit=limit, min_edge=min_edge, min_volume=min_volume)
+
+
+@app.get("/api/scan/sports")
+async def scan_sports(limit: int = Query(100, le=200)):
+    """Sports-specific scan with team data from football-data.org."""
+    scanner = _get_scanner()
+    return await scanner.sports_scan(limit=limit)
+
+
+@app.get("/api/scan/crypto")
+async def scan_crypto():
+    """Crypto latency arbitrage scan using Binance + CoinGecko data."""
+    scanner = _get_scanner()
+    return await scanner.crypto_scan()
+
+
+@app.get("/api/scan/arbitrage")
+async def scan_arbitrage(limit: int = Query(200, le=500)):
+    """Cross-market arbitrage scan (YES+NO gaps and contradictions)."""
+    scanner = _get_scanner()
+    return await scanner.arbitrage_scan(limit=limit)
+
+
+# ── Model Analysis Endpoints ────────────────────────────────────
+
+@app.get("/api/models/sports/{market_id}")
+async def model_sports_analysis(market_id: str):
+    """Get sports model analysis for a specific market."""
+    from data_feeds import get_full_sports_context, fetch_todays_matches
+    from scanner import categorize_market
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(f"{GAMMA_API}/markets/{market_id}")
+        if resp.status_code != 200:
+            return {"error": "Market not found"}
+        market = resp.json()
+
+    category = categorize_market(market)
+    if not category.startswith("sports"):
+        return {"error": "Market is not a sports market", "category": category}
+
+    analysis = analyze_market_edge(market)
+    matches = await fetch_todays_matches()
+
+    # Try to match to a real football match
+    scanner = _get_scanner()
+    match_context = scanner._match_to_football(market, matches)
+
+    return {
+        "market_id": market_id,
+        "question": market.get("question", ""),
+        "category": category,
+        "basic_analysis": analysis,
+        "match_context": match_context,
+    }
+
+
+@app.get("/api/models/crypto/{market_id}")
+async def model_crypto_analysis(market_id: str):
+    """Get crypto model analysis for a specific market."""
+    from data_feeds import get_full_crypto_context
+    from scanner import categorize_market
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(f"{GAMMA_API}/markets/{market_id}")
+        if resp.status_code != 200:
+            return {"error": "Market not found"}
+        market = resp.json()
+
+    category = categorize_market(market)
+    analysis = analyze_market_edge(market)
+    yes_price = analysis.get("yes_price", 0.5)
+
+    # Determine which crypto
+    coin_map = {"crypto_btc": "bitcoin", "crypto_eth": "ethereum", "crypto_sol": "solana"}
+    coin_id = coin_map.get(category, "bitcoin")
+
+    crypto_context = await get_full_crypto_context(coin_id)
+    aggregator = _get_aggregator()
+    estimate = aggregator.crypto_model.detect_arbitrage(yes_price, crypto_context)
+
+    return {
+        "market_id": market_id,
+        "question": market.get("question", ""),
+        "category": category,
+        "basic_analysis": analysis,
+        "crypto_context": {
+            "coin": coin_id,
+            "binance_price": crypto_context.get("binance_price", 0),
+            "coingecko_price": crypto_context.get("coingecko_price", 0),
+            "momentum_5m": crypto_context.get("momentum_5m", {}),
+            "momentum_1h": crypto_context.get("momentum_1h", {}),
+            "change_24h": crypto_context.get("change_24h_pct", 0),
+        },
+        "model_estimate": {
+            "our_probability": estimate.our_probability,
+            "market_probability": estimate.market_probability,
+            "edge": estimate.edge,
+            "confidence": estimate.confidence,
+            "reasoning": estimate.reasoning,
+        },
+    }
+
+
+# ── Trade Execution Endpoints ───────────────────────────────────
+
+class TradeRequest(BaseModel):
+    market_id: str
+    token_id: str
+    side: str
+    edge: float = 0.0
+    our_probability: float = 0.5
+    market_probability: float = 0.5
+    category: str = "manual"
+    strategy: str = "manual"
+
+
+@app.post("/api/trade/execute")
+async def execute_trade(req: TradeRequest):
+    """Execute a trade (requires API creds or runs in dry-run mode)."""
+    trader = _get_trader()
+    opportunity = {
+        "market_id": req.market_id,
+        "token_id": req.token_id,
+        "side": req.side,
+        "edge": req.edge,
+        "our_probability": req.our_probability,
+        "market_probability": req.market_probability,
+        "category": req.category,
+        "strategy": req.strategy,
+    }
+    result = await trader.execute_opportunity(opportunity)
+    return result
+
+
+@app.get("/api/trade/orders")
+async def get_trade_orders():
+    """Get open orders from Polymarket CLOB."""
+    trader = _get_trader()
+    return await trader.get_open_orders()
+
+
+@app.post("/api/trade/cancel/{order_id}")
+async def cancel_trade_order(order_id: str):
+    """Cancel an open order."""
+    trader = _get_trader()
+    return await trader.cancel_order(order_id)
+
+
+# ── Strategy Engine Endpoints ───────────────────────────────────
+
+@app.get("/api/strategies")
+def get_strategy_report():
+    """Full strategy performance report with classifications."""
+    engine = _get_strategy_engine()
+    strategies = engine.analyze_strategies()
+    return {"strategies": strategies}
+
+
+@app.get("/api/strategies/niches")
+def get_niche_report():
+    """Niche discovery report — which categories and signals are most profitable."""
+    engine = _get_strategy_engine()
+    return engine.get_niche_report()
+
+
+@app.get("/api/strategies/{strategy_name}")
+def get_strategy_detail(strategy_name: str):
+    """Detailed view of a single strategy with recent bets and daily P&L."""
+    engine = _get_strategy_engine()
+    return engine.get_strategy_detail(strategy_name)
+
+
+# ── Extended Analytics Endpoints ────────────────────────────────
+
+@app.get("/api/analytics/detailed")
+def get_detailed_analytics():
+    """Detailed P&L with strategy breakdown."""
+    db = get_db()
+    engine = _get_strategy_engine()
+
+    open_pos = db.execute(
+        "SELECT COUNT(*), COALESCE(SUM(pnl), 0), COALESCE(SUM(size), 0) FROM positions WHERE status = 'open'"
+    ).fetchone()
+    closed = db.execute(
+        "SELECT COUNT(*), COALESCE(SUM(pnl), 0) FROM positions WHERE status IN ('won', 'lost')"
+    ).fetchone()
+    wins = db.execute("SELECT COUNT(*) FROM positions WHERE status = 'won'").fetchone()[0]
+    losses = db.execute("SELECT COUNT(*) FROM positions WHERE status = 'lost'").fetchone()[0]
+    total_closed = wins + losses
+
+    strategies = engine.analyze_strategies()
+
+    db.close()
+
+    return {
+        "portfolio": {
+            "open_positions": open_pos[0],
+            "unrealized_pnl": round(open_pos[1], 2),
+            "total_exposure": round(open_pos[2], 2),
+            "closed_positions": closed[0],
+            "realized_pnl": round(closed[1], 2),
+            "total_pnl": round(open_pos[1] + closed[1], 2),
+            "win_rate": round(wins / total_closed * 100, 1) if total_closed > 0 else 0,
+            "wins": wins,
+            "losses": losses,
+        },
+        "strategies": strategies,
+        "niche_report": engine.get_niche_report(),
+    }
+
+
+@app.get("/api/analytics/daily")
+def get_daily_analytics(days: int = Query(30, le=365)):
+    """Daily P&L time series."""
+    db = get_db()
+    daily = db.execute(
+        """SELECT date(opened_at) as day,
+                  SUM(pnl) as daily_pnl,
+                  COUNT(*) as bets,
+                  SUM(CASE WHEN status = 'won' THEN 1 ELSE 0 END) as wins,
+                  SUM(CASE WHEN status = 'lost' THEN 1 ELSE 0 END) as losses,
+                  SUM(size) as volume
+           FROM positions
+           WHERE opened_at > datetime('now', ?)
+           GROUP BY date(opened_at)
+           ORDER BY day""",
+        (f"-{days} days",),
+    ).fetchall()
+    db.close()
+
+    rows = [dict(d) for d in daily]
+    # Compute cumulative P&L
+    cumulative = 0.0
+    for row in rows:
+        cumulative += row["daily_pnl"] or 0
+        row["cumulative_pnl"] = round(cumulative, 2)
+
+    return {"daily": rows, "days": days}
+
+
+@app.get("/api/analytics/category")
+def get_category_analytics():
+    """Performance breakdown by market category."""
+    db = get_db()
+    categories = db.execute(
+        """SELECT p.strategy as category,
+                  COUNT(*) as total_bets,
+                  SUM(CASE WHEN p.status = 'won' THEN 1 ELSE 0 END) as wins,
+                  SUM(CASE WHEN p.status = 'lost' THEN 1 ELSE 0 END) as losses,
+                  COALESCE(SUM(p.pnl), 0) as total_pnl,
+                  COALESCE(AVG(p.pnl), 0) as avg_pnl,
+                  COALESCE(SUM(p.size), 0) as total_volume
+           FROM positions p
+           GROUP BY p.strategy
+           ORDER BY total_pnl DESC"""
+    ).fetchall()
+    db.close()
+
+    results = []
+    for c in categories:
+        c = dict(c)
+        resolved = c["wins"] + c["losses"]
+        c["win_rate"] = round(c["wins"] / resolved * 100, 1) if resolved > 0 else 0
+        c["total_pnl"] = round(c["total_pnl"], 2)
+        c["avg_pnl"] = round(c["avg_pnl"], 2)
+        results.append(c)
+
+    return {"categories": results}
 
 
 if __name__ == "__main__":
