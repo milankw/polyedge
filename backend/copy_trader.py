@@ -330,7 +330,7 @@ class CopyTradeEngine:
     # ── Price Updates ─────────────────────────────────────────────
 
     async def update_prices(self) -> dict:
-        """Update current prices for all open sim positions."""
+        """Update current prices for all open sim positions using Gamma API slug lookup."""
         db = self._get_db()
         summary = {"updated": 0, "errors": 0}
 
@@ -339,33 +339,71 @@ class CopyTradeEngine:
                 "SELECT * FROM ct_trades WHERE sim_status = 'open'"
             ).fetchall()
 
-            # Group by asset to avoid duplicate API calls
-            asset_prices = {}
+            # Group by market_slug to avoid duplicate API calls
+            slug_prices = {}  # slug -> {outcome_index: price}
             for trade in open_trades:
-                asset = trade["asset"]
-                if asset and asset not in asset_prices:
+                slug = trade["market_slug"]
+                if slug and slug not in slug_prices:
                     try:
                         async with httpx.AsyncClient(timeout=15) as client:
                             resp = await client.get(
-                                f"{CLOB_API}/price",
-                                params={"token_id": asset}
+                                f"{GAMMA_API}/markets",
+                                params={"slug": slug, "limit": 1}
                             )
                             if resp.status_code == 200:
-                                price_data = resp.json()
-                                asset_prices[asset] = float(price_data.get("price", 0) or 0)
+                                markets = resp.json()
+                                if markets:
+                                    market = markets[0]
+                                    outcome_prices = json.loads(market.get("outcomePrices", "[]"))
+                                    is_closed = market.get("closed", False)
+                                    slug_prices[slug] = {
+                                        "prices": [float(p) for p in outcome_prices] if outcome_prices else [],
+                                        "closed": is_closed
+                                    }
                         await asyncio.sleep(REQUEST_DELAY)
                     except Exception:
                         summary["errors"] += 1
 
             for trade in open_trades:
-                asset = trade["asset"]
-                if asset in asset_prices and asset_prices[asset] > 0:
-                    current_price = asset_prices[asset]
-                    entry_price = trade["sim_entry_price"]
-                    sim_size = trade["sim_size"]
-                    shares = sim_size / entry_price if entry_price > 0 else 0
-                    unrealized_pnl = (current_price - entry_price) * shares
+                slug = trade["market_slug"]
+                if slug not in slug_prices:
+                    continue
+                market_data = slug_prices[slug]
+                prices = market_data["prices"]
+                outcome_idx = trade["outcome_index"]
+                if not prices or outcome_idx >= len(prices):
+                    continue
 
+                current_price = prices[outcome_idx]
+                entry_price = trade["sim_entry_price"]
+                sim_size = trade["sim_size"]
+                shares = sim_size / entry_price if entry_price > 0 else 0
+
+                # Check if market resolved
+                if market_data["closed"]:
+                    if current_price >= 0.95:
+                        pnl = shares * 1.0 - sim_size
+                        status = "resolved_win"
+                    elif current_price <= 0.05:
+                        pnl = -sim_size
+                        status = "resolved_loss"
+                    else:
+                        pnl = (current_price - entry_price) * shares
+                        status = "closed_profit" if pnl >= 0 else "closed_loss"
+
+                    db.execute("""
+                        UPDATE ct_trades SET
+                            sim_current_price = ?,
+                            sim_pnl = ?,
+                            sim_status = ?,
+                            sim_exit_price = ?,
+                            sim_exit_time = datetime('now'),
+                            updated_at = datetime('now')
+                        WHERE id = ?
+                    """, (current_price, round(pnl, 4), status, current_price, trade["id"]))
+                else:
+                    # Still open — unrealized P&L
+                    unrealized_pnl = (current_price - entry_price) * shares
                     db.execute("""
                         UPDATE ct_trades SET
                             sim_current_price = ?,
@@ -373,7 +411,27 @@ class CopyTradeEngine:
                             updated_at = datetime('now')
                         WHERE id = ?
                     """, (current_price, round(unrealized_pnl, 4), trade["id"]))
-                    summary["updated"] += 1
+
+                summary["updated"] += 1
+
+            # Update wallet total P&L and win rate
+            wallets = db.execute("SELECT id FROM ct_wallets").fetchall()
+            for w in wallets:
+                stats = db.execute("""
+                    SELECT 
+                        COALESCE(SUM(sim_pnl), 0) as total_pnl,
+                        COUNT(*) as total_trades,
+                        SUM(CASE WHEN sim_status IN ('resolved_win', 'closed_profit') THEN 1 ELSE 0 END) as wins
+                    FROM ct_trades WHERE wallet_id = ? AND sim_status != 'open'
+                """, (w["id"],)).fetchone()
+                total_pnl = stats["total_pnl"]
+                total_resolved = stats["total_trades"]
+                wins = stats["wins"]
+                win_rate = round((wins / total_resolved * 100), 1) if total_resolved > 0 else 0.0
+                db.execute(
+                    "UPDATE ct_wallets SET total_sim_pnl = ?, win_rate = ? WHERE id = ?",
+                    (round(total_pnl, 4), win_rate, w["id"])
+                )
 
             db.commit()
             return summary

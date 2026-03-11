@@ -709,12 +709,20 @@ async function loadCTPortfolio() {
       (perf.wins || 0) + "W / " + (perf.losses || 0) + "L");
 
     if (perf.best_wallet) {
-      setCTKPI("ct-kpi-best", perf.best_wallet.label || "—",
+      var bestLabel = (perf.best_wallet.label || "—");
+      if (bestLabel.length > 12) bestLabel = bestLabel.substring(0, 10) + "..";
+      setCTKPI("ct-kpi-best", bestLabel,
         perf.best_wallet.pnl, formatMoney(perf.best_wallet.pnl));
+      var bestEl = document.getElementById("ct-kpi-best");
+      if (bestEl) bestEl.style.fontSize = "var(--text-lg)";
     }
     if (perf.worst_wallet) {
-      setCTKPI("ct-kpi-worst", perf.worst_wallet.label || "—",
+      var worstLabel = (perf.worst_wallet.label || "—");
+      if (worstLabel.length > 12) worstLabel = worstLabel.substring(0, 10) + "..";
+      setCTKPI("ct-kpi-worst", worstLabel,
         perf.worst_wallet.pnl, formatMoney(perf.worst_wallet.pnl));
+      var worstEl = document.getElementById("ct-kpi-worst");
+      if (worstEl) worstEl.style.fontSize = "var(--text-lg)";
     }
   }
 

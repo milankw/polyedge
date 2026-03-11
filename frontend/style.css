@@ -315,6 +315,10 @@ html, body { height: 100%; overflow: hidden; margin: 0; }
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums lining-nums;
   letter-spacing: -0.02em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
 }
 
 .kpi-value.positive { color: var(--color-success); }
