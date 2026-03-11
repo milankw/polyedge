@@ -79,6 +79,14 @@
       </button></li>
     </ul>
 
+    <div class="sidebar-section">Copy Trade</div>
+    <ul class="sidebar-nav" role="list">
+      <li><button onclick="switchView('copytrade')" data-view="copytrade">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><path d="M20 8v6M23 11h-6"/></svg>
+        Copy Trade
+      </button></li>
+    </ul>
+
     <div class="sidebar-footer">
       <div class="engine-status">
         <span class="status-dot" id="statusDot"></span>
@@ -476,6 +484,252 @@
             <button class="btn btn-danger" onclick="resetSimulation()" style="width: 100%; margin-top: var(--space-2)">
               Reset Simulation
             </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Copy Trade View -->
+    <section id="view-copytrade" class="view-section">
+      <!-- Sub-tabs -->
+      <div class="tab-filters" id="ctTabs">
+        <button class="tab-filter active" onclick="switchCTTab('portfolio')">Portfolio</button>
+        <button class="tab-filter" onclick="switchCTTab('discover')">Discover</button>
+        <button class="tab-filter" onclick="switchCTTab('analysis')">Analysis</button>
+      </div>
+
+      <!-- Portfolio Tab -->
+      <div id="ct-tab-portfolio" class="ct-tab active">
+        <!-- KPI Row -->
+        <div class="kpi-grid" id="ctKpiGrid">
+          <div class="kpi-card">
+            <div class="kpi-label">Total Sim P&L</div>
+            <div class="kpi-value neutral" id="ct-kpi-pnl">$0.00</div>
+            <div class="kpi-delta flat" id="ct-kpi-pnl-detail">No trades yet</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Active Wallets</div>
+            <div class="kpi-value neutral" id="ct-kpi-wallets">0</div>
+            <div class="kpi-delta flat" id="ct-kpi-wallets-detail">—</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Open Positions</div>
+            <div class="kpi-value neutral" id="ct-kpi-open">0</div>
+            <div class="kpi-delta flat" id="ct-kpi-open-detail">—</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Win Rate</div>
+            <div class="kpi-value neutral" id="ct-kpi-winrate">0%</div>
+            <div class="kpi-delta flat" id="ct-kpi-winrate-detail">0W / 0L</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Best Wallet</div>
+            <div class="kpi-value neutral" id="ct-kpi-best">—</div>
+            <div class="kpi-delta flat" id="ct-kpi-best-detail">—</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Worst Wallet</div>
+            <div class="kpi-value neutral" id="ct-kpi-worst">—</div>
+            <div class="kpi-delta flat" id="ct-kpi-worst-detail">—</div>
+          </div>
+        </div>
+
+        <!-- Action Buttons -->
+        <div style="display:flex;gap:var(--space-3);margin-bottom:var(--space-4);">
+          <button class="btn btn-primary btn-sm" onclick="ctScanAll()">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+            Scan Wallets
+          </button>
+          <button class="btn btn-ghost btn-sm" onclick="ctUpdatePrices()">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+            Update Prices
+          </button>
+        </div>
+
+        <!-- Wallet Cards Grid -->
+        <div class="ct-wallet-grid" id="ctWalletGrid">
+          <div class="empty-state">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><path d="M20 8v6M23 11h-6"/></svg>
+            <p>No wallets tracked yet — go to Discover to add wallets</p>
+          </div>
+        </div>
+
+        <!-- Recent Mirror Trades Table -->
+        <div class="card" style="margin-top:var(--space-4);">
+          <div class="card-header">
+            <span class="card-title">Recent Mirror Trades</span>
+            <span class="text-muted text-xs" id="ctTradesCount"></span>
+          </div>
+          <div style="overflow-x:auto;">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Wallet</th>
+                  <th>Market</th>
+                  <th>Side</th>
+                  <th>Sim Size</th>
+                  <th>Entry</th>
+                  <th>Current</th>
+                  <th>P&L</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="ctTradesBody">
+                <tr><td colspan="9" class="table-empty">No mirror trades yet</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Discover Tab -->
+      <div id="ct-tab-discover" class="ct-tab">
+        <!-- Leaderboard Browser -->
+        <div class="card" style="margin-bottom:var(--space-4);">
+          <div class="card-header">
+            <span class="card-title">Polymarket Leaderboard</span>
+            <div style="display:flex;gap:var(--space-2);align-items:center;">
+              <select class="input" id="ctLeaderboardPeriod" style="width:auto;padding:var(--space-1) var(--space-2);font-size:var(--text-xs);">
+                <option value="MONTH">This Month</option>
+                <option value="WEEK">This Week</option>
+                <option value="ALL">All Time</option>
+                <option value="DAY">Today</option>
+              </select>
+              <button class="btn btn-primary btn-sm" onclick="ctScanLeaderboard()">Scan Leaderboard</button>
+            </div>
+          </div>
+          <div style="overflow-x:auto;">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Rank</th>
+                  <th>Username</th>
+                  <th>PnL</th>
+                  <th>Volume</th>
+                  <th>X Username</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody id="ctLeaderboardBody">
+                <tr><td colspan="6" class="table-empty">Click "Scan Leaderboard" to discover top wallets</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Manual Add -->
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Add Wallet Manually</span>
+            </div>
+            <div class="settings-form">
+              <div class="setting-row">
+                <label>Wallet Address</label>
+                <input class="input" type="text" id="ctAddAddress" placeholder="0x...">
+              </div>
+              <div class="setting-row">
+                <label>Label (optional)</label>
+                <input class="input" type="text" id="ctAddLabel" placeholder="e.g. Top Trader">
+              </div>
+              <div class="setting-row">
+                <label>Sim Allocation ($)</label>
+                <input class="input" type="number" id="ctAddAlloc" value="1000" step="100" min="10">
+              </div>
+              <button class="btn btn-primary" onclick="ctAddWallet()" style="margin-top:var(--space-2)">Add Wallet</button>
+            </div>
+          </div>
+
+          <!-- Bulk Import -->
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Bulk Import</span>
+            </div>
+            <div class="settings-form">
+              <div class="setting-row">
+                <label>Paste addresses (one per line)</label>
+                <textarea class="input" id="ctBulkAddresses" rows="6" placeholder="0xabc123...&#10;0xdef456...&#10;0x789..." style="resize:vertical;font-family:var(--font-mono);font-size:var(--text-xs);"></textarea>
+              </div>
+              <div class="setting-row">
+                <label>Default Allocation ($)</label>
+                <input class="input" type="number" id="ctBulkAlloc" value="1000" step="100" min="10">
+              </div>
+              <button class="btn btn-primary" onclick="ctBulkImport()" style="margin-top:var(--space-2)">Import All</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Analysis Tab -->
+      <div id="ct-tab-analysis" class="ct-tab">
+        <div class="grid-2" style="margin-bottom:var(--space-4);">
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Wallet Comparison</span>
+            </div>
+            <div class="chart-container">
+              <canvas id="ctComparisonChart"></canvas>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Trade Distribution</span>
+            </div>
+            <div class="chart-container">
+              <canvas id="ctDistributionChart"></canvas>
+            </div>
+          </div>
+        </div>
+
+        <!-- Best / Worst Trades -->
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Best Trades</span>
+            </div>
+            <div style="overflow-x:auto;">
+              <table class="data-table">
+                <thead>
+                  <tr><th>Market</th><th>Wallet</th><th>P&L</th><th>Entry</th><th>Exit</th></tr>
+                </thead>
+                <tbody id="ctBestTradesBody">
+                  <tr><td colspan="5" class="table-empty">No data yet</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Worst Trades</span>
+            </div>
+            <div style="overflow-x:auto;">
+              <table class="data-table">
+                <thead>
+                  <tr><th>Market</th><th>Wallet</th><th>P&L</th><th>Entry</th><th>Exit</th></tr>
+                </thead>
+                <tbody id="ctWorstTradesBody">
+                  <tr><td colspan="5" class="table-empty">No data yet</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- Scan Log -->
+        <div class="card" style="margin-top:var(--space-4);">
+          <div class="card-header">
+            <span class="card-title">Scan History</span>
+          </div>
+          <div style="overflow-x:auto;">
+            <table class="data-table">
+              <thead>
+                <tr><th>Time</th><th>Wallets Scanned</th><th>New Trades</th><th>Mirrored</th><th>Errors</th></tr>
+              </thead>
+              <tbody id="ctScanLogBody">
+                <tr><td colspan="5" class="table-empty">No scans yet</td></tr>
+              </tbody>
+            </table>
           </div>
         </div>
       </div>

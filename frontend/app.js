@@ -45,6 +45,7 @@ function switchView(view) {
     "strategies": "Strategy Performance",
     "cycles": "Cycle Log",
     "settings": "Settings",
+    "copytrade": "Copy Trade",
   };
   document.getElementById("pageTitle").textContent = titles[view] || view;
 
@@ -56,6 +57,7 @@ function switchView(view) {
   if (view === "strategies") loadSimStrategies();
   if (view === "cycles") { loadCycles(); loadDecisions(); }
   if (view === "settings") loadSimSettings();
+  if (view === "copytrade") loadCopyTrade();
 }
 
 /* ── API Helpers ───────────────────────────────────────────── */
@@ -664,6 +666,459 @@ async function resetSimulation() {
     showToast("Simulation reset — bankroll: " + formatMoney(result.bankroll), "success");
     loadDashboard();
   }
+}
+
+/* ── Copy Trade ────────────────────────────────────────────── */
+
+var ctState = {
+  currentTab: "portfolio",
+  comparisonChart: null,
+  distributionChart: null,
+};
+
+function switchCTTab(tab) {
+  ctState.currentTab = tab;
+  document.querySelectorAll("#ctTabs .tab-filter").forEach(function (btn) {
+    btn.classList.toggle("active", btn.textContent.toLowerCase() === tab);
+  });
+  document.querySelectorAll(".ct-tab").forEach(function (t) { t.classList.remove("active"); });
+  var target = document.getElementById("ct-tab-" + tab);
+  if (target) target.classList.add("active");
+
+  if (tab === "portfolio") loadCTPortfolio();
+  if (tab === "analysis") loadCTAnalysis();
+}
+
+async function loadCopyTrade() {
+  loadCTPortfolio();
+}
+
+async function loadCTPortfolio() {
+  var [perf, wallets, trades] = await Promise.all([
+    apiGet("/api/copytrade/performance"),
+    apiGet("/api/copytrade/wallets"),
+    apiGet("/api/copytrade/trades?limit=20"),
+  ]);
+
+  if (perf) {
+    setCTKPI("ct-kpi-pnl", formatMoney(perf.total_pnl), perf.total_pnl,
+      "Realized: " + formatMoney(perf.realized_pnl) + " | Unrealized: " + formatMoney(perf.unrealized_pnl));
+    setCTKPI("ct-kpi-wallets", perf.active_wallets, 0, "tracking");
+    setCTKPI("ct-kpi-open", perf.open_positions, 0, perf.total_trades + " total trades");
+    setCTKPI("ct-kpi-winrate", perf.win_rate + "%", perf.win_rate >= 50 ? 1 : perf.win_rate > 0 ? -1 : 0,
+      (perf.wins || 0) + "W / " + (perf.losses || 0) + "L");
+
+    if (perf.best_wallet) {
+      setCTKPI("ct-kpi-best", perf.best_wallet.label || "—",
+        perf.best_wallet.pnl, formatMoney(perf.best_wallet.pnl));
+    }
+    if (perf.worst_wallet) {
+      setCTKPI("ct-kpi-worst", perf.worst_wallet.label || "—",
+        perf.worst_wallet.pnl, formatMoney(perf.worst_wallet.pnl));
+    }
+  }
+
+  // Wallet cards
+  if (wallets && wallets.wallets && wallets.wallets.length > 0) {
+    renderCTWalletGrid(wallets.wallets);
+  }
+
+  // Recent trades
+  if (trades && trades.trades && trades.trades.length > 0) {
+    renderCTTradesTable(trades.trades, trades.total);
+  }
+}
+
+function setCTKPI(id, value, direction, detail) {
+  var valEl = document.getElementById(id);
+  if (!valEl) return;
+  valEl.textContent = value;
+  valEl.className = "kpi-value " + (direction > 0 ? "positive" : direction < 0 ? "negative" : "neutral");
+  var detailEl = valEl.nextElementSibling;
+  if (detailEl && detail) {
+    detailEl.textContent = detail;
+    detailEl.className = "kpi-delta " + (direction > 0 ? "up" : direction < 0 ? "down" : "flat");
+  }
+}
+
+function renderCTWalletGrid(wallets) {
+  var container = document.getElementById("ctWalletGrid");
+  container.innerHTML = wallets.map(function (w) {
+    var pnl = w.current_pnl || w.total_sim_pnl || 0;
+    var pnlColor = pnl > 0 ? "var(--color-success)" : pnl < 0 ? "var(--color-error)" : "var(--color-text-muted)";
+    var activeClass = w.is_active ? "" : " ct-wallet-card-inactive";
+    var truncAddr = w.address ? (w.address.substring(0, 6) + "..." + w.address.substring(w.address.length - 4)) : "—";
+
+    return '<div class="ct-wallet-card' + activeClass + '">' +
+      '<div class="ct-wallet-header">' +
+        '<div>' +
+          '<div class="ct-wallet-label">' + escapeHtml(w.label || "Wallet") + '</div>' +
+          '<div class="ct-wallet-address mono">' + truncAddr + '</div>' +
+        '</div>' +
+        '<div class="ct-wallet-toggle">' +
+          '<button class="btn btn-ghost btn-sm" onclick="ctRemoveWallet(' + w.id + ')" title="Remove wallet">' +
+            '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>' +
+          '</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="ct-wallet-stats">' +
+        '<div class="ct-wallet-stat">' +
+          '<span class="ct-wallet-stat-label">Allocation</span>' +
+          '<span class="ct-wallet-stat-value">' + formatMoney(w.alloc_usd || 0) + '</span>' +
+        '</div>' +
+        '<div class="ct-wallet-stat">' +
+          '<span class="ct-wallet-stat-label">Sim P&L</span>' +
+          '<span class="ct-wallet-stat-value" style="color:' + pnlColor + '">' + (pnl >= 0 ? "+" : "") + formatMoney(pnl) + '</span>' +
+        '</div>' +
+        '<div class="ct-wallet-stat">' +
+          '<span class="ct-wallet-stat-label">Open</span>' +
+          '<span class="ct-wallet-stat-value">' + (w.open_positions || 0) + '</span>' +
+        '</div>' +
+        '<div class="ct-wallet-stat">' +
+          '<span class="ct-wallet-stat-label">Win Rate</span>' +
+          '<span class="ct-wallet-stat-value">' + (w.win_rate || 0) + '%</span>' +
+        '</div>' +
+      '</div>' +
+      '<div class="ct-wallet-footer">' +
+        '<span class="text-xs text-muted">Trades: ' + (w.trade_count || 0) + '</span>' +
+        '<span class="text-xs text-muted">Last: ' + formatTime(w.last_trade_time) + '</span>' +
+        '<span class="badge badge-' + (w.source === "leaderboard" ? "high" : w.source === "import" ? "low" : "none") + '">' + (w.source || "manual") + '</span>' +
+      '</div>' +
+    '</div>';
+  }).join("");
+}
+
+function renderCTTradesTable(trades, total) {
+  var countEl = document.getElementById("ctTradesCount");
+  if (countEl) countEl.textContent = total + " total";
+  var tbody = document.getElementById("ctTradesBody");
+  if (!trades || trades.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="9" class="table-empty">No mirror trades yet</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = trades.map(function (t) {
+    var pnl = t.sim_pnl || 0;
+    var pnlColor = pnl > 0 ? "var(--color-success)" : pnl < 0 ? "var(--color-error)" : "var(--color-text-muted)";
+    var statusClass = t.sim_status === "open" ? "badge-low" :
+      (t.sim_status === "closed_profit" || t.sim_status === "resolved_win") ? "badge-high" : "badge-danger";
+    return '<tr>' +
+      '<td class="text-xs text-muted">' + formatTime(t.detected_at) + '</td>' +
+      '<td class="text-xs">' + escapeHtml(t.wallet_label || (t.wallet_address || "").substring(0, 8)) + '</td>' +
+      '<td><div class="market-question">' + escapeHtml(truncate(t.market_title || "—", 40)) + '</div></td>' +
+      '<td><span class="badge badge-' + (t.side || "buy").toLowerCase() + '">' + (t.side || "—") + '</span></td>' +
+      '<td class="mono">' + formatMoney(t.sim_size || 0) + '</td>' +
+      '<td class="mono">' + centsStr(t.sim_entry_price) + '</td>' +
+      '<td class="mono">' + centsStr(t.sim_current_price) + '</td>' +
+      '<td class="mono" style="color:' + pnlColor + ';font-weight:600">' + (pnl >= 0 ? "+" : "") + formatMoney(pnl) + '</td>' +
+      '<td><span class="badge ' + statusClass + '">' + (t.sim_status || "—").replace(/_/g, " ") + '</span></td>' +
+    '</tr>';
+  }).join("");
+}
+
+/* ── Copy Trade: Discover ──────────────────────────────────── */
+
+async function ctScanLeaderboard() {
+  var period = document.getElementById("ctLeaderboardPeriod").value;
+  showToast("Scanning leaderboard...", "info");
+  var data = await apiGet("/api/copytrade/discover?time_period=" + period + "&limit=50&min_pnl=1000");
+  if (!data || !data.wallets) {
+    showToast("Failed to scan leaderboard", "error");
+    return;
+  }
+
+  var tbody = document.getElementById("ctLeaderboardBody");
+  if (data.wallets.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="6" class="table-empty">No wallets found matching criteria</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = data.wallets.map(function (w) {
+    var pnlColor = w.pnl > 0 ? "var(--color-success)" : "var(--color-error)";
+    return '<tr>' +
+      '<td class="mono">#' + (w.rank || "—") + '</td>' +
+      '<td style="font-weight:500">' + escapeHtml(w.username || w.address.substring(0, 10)) + '</td>' +
+      '<td class="mono" style="color:' + pnlColor + '">' + formatMoney(w.pnl) + '</td>' +
+      '<td class="mono">' + formatCompact(w.volume) + '</td>' +
+      '<td class="text-xs text-muted">' + escapeHtml(w.x_username || "—") + '</td>' +
+      '<td><button class="btn btn-primary btn-sm" onclick="ctTrackFromLeaderboard(\'' + escapeHtml(w.address) + '\', \'' + escapeHtml(w.username || w.address.substring(0, 10)) + '\', ' + (w.pnl || 0) + ', ' + (w.volume || 0) + ', ' + (w.rank || 0) + ')">Track</button></td>' +
+    '</tr>';
+  }).join("");
+
+  showToast("Found " + data.wallets.length + " wallets", "success");
+}
+
+async function ctTrackFromLeaderboard(address, label, pnl, volume, rank) {
+  var result = await apiPost("/api/copytrade/wallets", {
+    address: address,
+    label: label,
+    alloc_usd: 1000,
+  });
+  if (result && !result.error) {
+    showToast("Tracking " + label, "success");
+    // Update leaderboard data on the wallet
+    var db_id = result.id;
+    if (db_id) {
+      // We'll store extra info via a direct fetch to update the wallet record
+      await apiPost("/api/copytrade/wallets/import", {
+        wallets: [] // no-op, just to trigger
+      });
+    }
+  } else {
+    showToast(result ? result.error : "Failed to add wallet", "error");
+  }
+}
+
+async function ctAddWallet() {
+  var address = document.getElementById("ctAddAddress").value.trim();
+  var label = document.getElementById("ctAddLabel").value.trim();
+  var alloc = parseFloat(document.getElementById("ctAddAlloc").value) || 1000;
+
+  if (!address) {
+    showToast("Please enter a wallet address", "error");
+    return;
+  }
+
+  var result = await apiPost("/api/copytrade/wallets", {
+    address: address,
+    label: label || null,
+    alloc_usd: alloc,
+  });
+
+  if (result && !result.error) {
+    showToast("Wallet added successfully", "success");
+    document.getElementById("ctAddAddress").value = "";
+    document.getElementById("ctAddLabel").value = "";
+  } else {
+    showToast(result ? result.error : "Failed to add wallet", "error");
+  }
+}
+
+async function ctBulkImport() {
+  var text = document.getElementById("ctBulkAddresses").value.trim();
+  var alloc = parseFloat(document.getElementById("ctBulkAlloc").value) || 1000;
+
+  if (!text) {
+    showToast("Please paste some addresses", "error");
+    return;
+  }
+
+  var addresses = text.split("\n").map(function (a) { return a.trim(); }).filter(function (a) { return a.length > 0; });
+  if (addresses.length === 0) {
+    showToast("No valid addresses found", "error");
+    return;
+  }
+
+  var wallets = addresses.map(function (addr) {
+    return { address: addr, alloc_usd: alloc };
+  });
+
+  showToast("Importing " + wallets.length + " wallets...", "info");
+  var result = await apiPost("/api/copytrade/wallets/import", { wallets: wallets });
+  if (result) {
+    showToast("Imported " + (result.imported || 0) + " wallets", "success");
+    document.getElementById("ctBulkAddresses").value = "";
+  } else {
+    showToast("Import failed", "error");
+  }
+}
+
+async function ctRemoveWallet(id) {
+  if (!confirm("Remove this wallet and all its mirror trades?")) return;
+  var resp = await fetch(API + "/api/copytrade/wallets/" + id, { method: "DELETE" });
+  var result = await resp.json();
+  if (result && result.status === "removed") {
+    showToast("Wallet removed", "success");
+    loadCTPortfolio();
+  } else {
+    showToast("Failed to remove wallet", "error");
+  }
+}
+
+/* ── Copy Trade: Actions ──────────────────────────────────── */
+
+async function ctScanAll() {
+  showToast("Scanning all wallets for new trades...", "info");
+  var result = await apiPost("/api/copytrade/scan");
+  if (result && !result.error) {
+    showToast(
+      "Scan complete: " + result.wallets_scanned + " wallets, " +
+      result.new_trades_found + " new trades, " + result.trades_mirrored + " mirrored",
+      "success"
+    );
+    loadCTPortfolio();
+  } else {
+    showToast("Scan failed", "error");
+  }
+}
+
+async function ctUpdatePrices() {
+  showToast("Updating prices...", "info");
+  var result = await apiPost("/api/copytrade/update-prices");
+  if (result) {
+    showToast("Updated " + (result.updated || 0) + " positions", "success");
+    loadCTPortfolio();
+  } else {
+    showToast("Price update failed", "error");
+  }
+}
+
+/* ── Copy Trade: Analysis ─────────────────────────────────── */
+
+async function loadCTAnalysis() {
+  var [wallets, trades, scanLog] = await Promise.all([
+    apiGet("/api/copytrade/wallets"),
+    apiGet("/api/copytrade/trades?limit=200"),
+    apiGet("/api/copytrade/scan-log?limit=50"),
+  ]);
+
+  // Wallet comparison chart
+  if (wallets && wallets.wallets && wallets.wallets.length > 0) {
+    renderCTComparisonChart(wallets.wallets);
+  }
+
+  // Trade distribution chart
+  if (trades && trades.trades && trades.trades.length > 0) {
+    renderCTDistributionChart(trades.trades);
+    renderCTBestWorstTrades(trades.trades);
+  }
+
+  // Scan log
+  if (scanLog && scanLog.logs && scanLog.logs.length > 0) {
+    renderCTScanLog(scanLog.logs);
+  }
+}
+
+function renderCTComparisonChart(wallets) {
+  var ctx = document.getElementById("ctComparisonChart");
+  if (!ctx) return;
+  if (ctState.comparisonChart) ctState.comparisonChart.destroy();
+
+  var labels = wallets.map(function (w) { return truncate(w.label || w.address.substring(0, 8), 12); });
+  var pnls = wallets.map(function (w) { return w.current_pnl || w.total_sim_pnl || 0; });
+  var colors = pnls.map(function (v) { return v >= 0 ? getCSS("--color-success") : getCSS("--color-error"); });
+
+  var textMuted = getCSS("--color-text-faint");
+
+  ctState.comparisonChart = new Chart(ctx, {
+    type: "bar",
+    data: {
+      labels: labels,
+      datasets: [{
+        label: "Sim P&L",
+        data: pnls,
+        backgroundColor: colors.map(function (c) { return c + "80"; }),
+        borderColor: colors,
+        borderWidth: 1,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { grid: { display: false }, ticks: { color: textMuted, font: { size: 10 } }, border: { display: false } },
+        y: { grid: { color: textMuted + "15" }, ticks: { color: textMuted, font: { size: 10 }, callback: function (v) { return "$" + v; } }, border: { display: false } },
+      },
+    },
+  });
+}
+
+function renderCTDistributionChart(trades) {
+  var ctx = document.getElementById("ctDistributionChart");
+  if (!ctx) return;
+  if (ctState.distributionChart) ctState.distributionChart.destroy();
+
+  // Group by status
+  var statusCounts = {};
+  trades.forEach(function (t) {
+    var s = t.sim_status || "unknown";
+    statusCounts[s] = (statusCounts[s] || 0) + 1;
+  });
+
+  var labels = Object.keys(statusCounts).map(function (s) { return s.replace(/_/g, " "); });
+  var values = Object.values(statusCounts);
+  var chartColors = [
+    getCSS("--color-primary"),
+    getCSS("--color-success"),
+    getCSS("--color-error"),
+    getCSS("--color-warning"),
+    getCSS("--color-blue"),
+    getCSS("--color-purple"),
+  ];
+
+  ctState.distributionChart = new Chart(ctx, {
+    type: "doughnut",
+    data: {
+      labels: labels,
+      datasets: [{
+        data: values,
+        backgroundColor: chartColors.slice(0, labels.length),
+        borderWidth: 0,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: {
+          position: "bottom",
+          labels: { color: getCSS("--color-text-muted"), font: { size: 11 }, padding: 16 },
+        },
+      },
+    },
+  });
+}
+
+function renderCTBestWorstTrades(trades) {
+  var buyTrades = trades.filter(function (t) { return t.side === "BUY"; });
+  var sorted = buyTrades.slice().sort(function (a, b) { return (b.sim_pnl || 0) - (a.sim_pnl || 0); });
+
+  var best = sorted.slice(0, 10);
+  var worst = sorted.slice(-10).reverse();
+
+  function renderTradeRows(list, tbodyId) {
+    var tbody = document.getElementById(tbodyId);
+    if (!list || list.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5" class="table-empty">No data</td></tr>';
+      return;
+    }
+    tbody.innerHTML = list.map(function (t) {
+      var pnl = t.sim_pnl || 0;
+      var pnlColor = pnl > 0 ? "var(--color-success)" : pnl < 0 ? "var(--color-error)" : "var(--color-text-muted)";
+      return '<tr>' +
+        '<td><div class="market-question">' + escapeHtml(truncate(t.market_title || "—", 30)) + '</div></td>' +
+        '<td class="text-xs">' + escapeHtml(t.wallet_label || (t.wallet_address || "").substring(0, 8)) + '</td>' +
+        '<td class="mono" style="color:' + pnlColor + ';font-weight:600">' + (pnl >= 0 ? "+" : "") + formatMoney(pnl) + '</td>' +
+        '<td class="mono">' + centsStr(t.sim_entry_price) + '</td>' +
+        '<td class="mono">' + centsStr(t.sim_exit_price || t.sim_current_price) + '</td>' +
+      '</tr>';
+    }).join("");
+  }
+
+  renderTradeRows(best, "ctBestTradesBody");
+  renderTradeRows(worst, "ctWorstTradesBody");
+}
+
+function renderCTScanLog(logs) {
+  var tbody = document.getElementById("ctScanLogBody");
+  if (!logs || logs.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" class="table-empty">No scans yet</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = logs.map(function (l) {
+    var errors = l.errors ? JSON.parse(l.errors || "[]") : [];
+    var errorStr = errors.length > 0 ? errors.length + " errors" : "None";
+    var errorColor = errors.length > 0 ? "var(--color-error)" : "var(--color-text-muted)";
+    return '<tr>' +
+      '<td class="text-xs">' + formatTime(l.timestamp) + '</td>' +
+      '<td class="mono">' + (l.wallets_scanned || 0) + '</td>' +
+      '<td class="mono">' + (l.new_trades_found || 0) + '</td>' +
+      '<td class="mono">' + (l.trades_mirrored || 0) + '</td>' +
+      '<td class="text-xs" style="color:' + errorColor + '">' + errorStr + '</td>' +
+    '</tr>';
+  }).join("");
 }
 
 /* ── Utilities ─────────────────────────────────────────────── */

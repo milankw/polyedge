@@ -207,6 +207,72 @@ def init_db():
             details TEXT DEFAULT '{}',
             created_at TEXT DEFAULT (datetime('now'))
         );
+
+        -- Copy Trade tables
+        CREATE TABLE IF NOT EXISTS ct_wallets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            address TEXT UNIQUE NOT NULL,
+            label TEXT,
+            source TEXT DEFAULT 'manual',
+            leaderboard_rank INTEGER,
+            leaderboard_pnl REAL,
+            leaderboard_volume REAL,
+            win_rate REAL,
+            alloc_usd REAL DEFAULT 1000.0,
+            is_active INTEGER DEFAULT 1,
+            added_at TEXT DEFAULT (datetime('now')),
+            last_checked TEXT,
+            total_sim_pnl REAL DEFAULT 0.0,
+            total_sim_trades INTEGER DEFAULT 0,
+            notes TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS ct_trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            wallet_id INTEGER REFERENCES ct_wallets(id),
+            wallet_address TEXT NOT NULL,
+            original_tx TEXT,
+            original_timestamp INTEGER,
+            condition_id TEXT,
+            asset TEXT,
+            side TEXT,
+            original_size REAL,
+            original_price REAL,
+            outcome TEXT,
+            outcome_index INTEGER,
+            market_title TEXT,
+            market_slug TEXT,
+            event_slug TEXT,
+            sim_size REAL,
+            sim_entry_price REAL,
+            sim_current_price REAL,
+            sim_pnl REAL DEFAULT 0.0,
+            sim_status TEXT DEFAULT 'open',
+            sim_exit_price REAL,
+            sim_exit_time TEXT,
+            detected_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS ct_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            wallet_id INTEGER REFERENCES ct_wallets(id),
+            timestamp TEXT DEFAULT (datetime('now')),
+            portfolio_value REAL,
+            open_positions INTEGER,
+            total_pnl REAL,
+            win_rate REAL,
+            sharpe_ratio REAL
+        );
+
+        CREATE TABLE IF NOT EXISTS ct_scan_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT DEFAULT (datetime('now')),
+            wallets_scanned INTEGER,
+            new_trades_found INTEGER,
+            trades_mirrored INTEGER,
+            errors TEXT
+        );
     """)
     # Seed default config
     defaults = {
@@ -1041,6 +1107,133 @@ def sim_strategies_list():
     """).fetchall()
     db.close()
     return {"strategies": [dict(r) for r in rows]}
+
+
+# ── Copy Trade Endpoints ─────────────────────────────────────────
+
+from copy_trader import CopyTradeEngine
+
+ct_engine = CopyTradeEngine()
+
+
+class WalletAdd(BaseModel):
+    address: str
+    label: Optional[str] = None
+    alloc_usd: Optional[float] = 1000.0
+
+
+class WalletImport(BaseModel):
+    wallets: list  # [{address, label?, alloc_usd?}]
+
+
+@app.get("/api/copytrade/wallets")
+async def ct_list_wallets():
+    """List all tracked wallets with summary stats."""
+    wallets = await ct_engine.get_wallets()
+    return {"wallets": wallets}
+
+
+@app.post("/api/copytrade/wallets")
+async def ct_add_wallet(wallet: WalletAdd):
+    """Add a wallet to track."""
+    result = await ct_engine.add_wallet(
+        address=wallet.address,
+        label=wallet.label,
+        alloc_usd=wallet.alloc_usd or 1000.0,
+        source="manual",
+    )
+    return result
+
+
+@app.delete("/api/copytrade/wallets/{wallet_id}")
+async def ct_remove_wallet(wallet_id: int):
+    """Remove a wallet from tracking."""
+    result = await ct_engine.remove_wallet(wallet_id)
+    return result
+
+
+@app.get("/api/copytrade/discover")
+async def ct_discover(
+    time_period: str = Query("MONTH"),
+    limit: int = Query(50, le=100),
+    min_pnl: float = Query(1000),
+):
+    """Fetch leaderboard candidates."""
+    wallets = await ct_engine.discover_wallets(
+        time_period=time_period, limit=limit, min_pnl=min_pnl
+    )
+    return {"wallets": wallets, "total": len(wallets)}
+
+
+@app.post("/api/copytrade/wallets/import")
+async def ct_import_wallets(data: WalletImport):
+    """Bulk import wallets."""
+    results = []
+    for w in data.wallets:
+        address = w.get("address", "") if isinstance(w, dict) else w
+        label = w.get("label") if isinstance(w, dict) else None
+        alloc = w.get("alloc_usd", 1000.0) if isinstance(w, dict) else 1000.0
+        result = await ct_engine.add_wallet(
+            address=address, label=label, alloc_usd=alloc, source="import"
+        )
+        results.append(result)
+    return {"imported": len(results), "results": results}
+
+
+@app.post("/api/copytrade/scan")
+async def ct_scan():
+    """Trigger scan of all wallets for new trades."""
+    result = await ct_engine.scan_all_wallets()
+    return result
+
+
+@app.post("/api/copytrade/update-prices")
+async def ct_update_prices():
+    """Update current prices for open positions."""
+    result = await ct_engine.update_prices()
+    return result
+
+
+@app.get("/api/copytrade/performance")
+async def ct_performance():
+    """Overall copy-trade P&L summary."""
+    result = await ct_engine.get_overall_performance()
+    return result
+
+
+@app.get("/api/copytrade/wallets/{wallet_id}/trades")
+async def ct_wallet_trades(
+    wallet_id: int,
+    limit: int = Query(50, le=200),
+    offset: int = 0,
+):
+    """All trades for a specific wallet."""
+    result = await ct_engine.get_trades(wallet_id=wallet_id, limit=limit, offset=offset)
+    return result
+
+
+@app.get("/api/copytrade/wallets/{wallet_id}/performance")
+async def ct_wallet_performance(wallet_id: int):
+    """Performance for a specific wallet."""
+    result = await ct_engine.get_wallet_performance(wallet_id)
+    return result
+
+
+@app.get("/api/copytrade/trades")
+async def ct_all_trades(
+    limit: int = Query(50, le=200),
+    offset: int = 0,
+):
+    """All copy trades across all wallets (paginated)."""
+    result = await ct_engine.get_trades(limit=limit, offset=offset)
+    return result
+
+
+@app.get("/api/copytrade/scan-log")
+async def ct_scan_log(limit: int = Query(50, le=200)):
+    """History of scan operations."""
+    logs = await ct_engine.get_scan_log(limit=limit)
+    return {"logs": logs}
 
 
 if __name__ == "__main__":
