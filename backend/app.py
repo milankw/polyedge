@@ -11,6 +11,7 @@ from fastapi import FastAPI, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from backend.copy_trader import CopyTradeMonitor
 from backend.engine import CopyTradeEngine
 
 logging.basicConfig(
@@ -20,6 +21,7 @@ logging.basicConfig(
 logger = logging.getLogger("polyedge.app")
 
 engine = CopyTradeEngine()
+copy_monitor = CopyTradeMonitor()
 scheduler = AsyncIOScheduler()
 
 # Track running scan to prevent overlaps
@@ -52,6 +54,15 @@ async def scheduled_snapshot():
     logger.info("Scheduled snapshot saved")
 
 
+async def scheduled_copy_trade_poll():
+    if copy_monitor._is_running:
+        logger.info("Copy trade poll already running, skipping")
+        return
+    logger.info("Scheduled copy trade poll starting...")
+    result = await copy_monitor.poll_wallets()
+    logger.info(f"Scheduled copy trade poll complete: {result}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
@@ -59,12 +70,14 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(scheduled_scan, "interval", minutes=30, id="scan_wallets")
     scheduler.add_job(scheduled_price_update, "interval", minutes=15, id="update_prices")
     scheduler.add_job(scheduled_snapshot, "interval", hours=1, id="save_snapshot")
+    scheduler.add_job(scheduled_copy_trade_poll, "interval", minutes=5, id="copy_trade_poll")
     scheduler.start()
-    logger.info("Scheduler started — scan every 30m, prices every 15m, snapshots every 1h")
+    logger.info("Scheduler started — scan every 30m, prices every 15m, snapshots every 1h, copy trade every 5m")
     yield
     # Shutdown
     scheduler.shutdown()
     await engine.close()
+    await copy_monitor.close()
     logger.info("PolyEdge v2 shut down")
 
 
@@ -156,6 +169,45 @@ async def trigger_full_cycle():
     async with _scan_lock:
         result = await engine.full_cycle()
     return {"status": "completed", "result": result}
+
+
+# ── Copy Trade Endpoints ──────────────────────────────────────────
+
+
+@app.get("/api/copy-trade/signals")
+async def copy_trade_signals(days: int = Query(7, ge=1, le=90)):
+    return await copy_monitor.get_signals(days=days)
+
+
+@app.get("/api/copy-trade/signals/{signal_id}")
+async def copy_trade_signal_detail(signal_id: int):
+    data = await copy_monitor.get_signal_detail(signal_id)
+    if "error" in data:
+        return JSONResponse(status_code=404, content=data)
+    return data
+
+
+@app.get("/api/copy-trade/settings")
+async def copy_trade_settings():
+    return await copy_monitor.get_settings()
+
+
+@app.post("/api/copy-trade/settings")
+async def update_copy_trade_settings(updates: dict):
+    return await copy_monitor.update_settings(updates)
+
+
+@app.post("/api/copy-trade/scan")
+async def trigger_copy_trade_scan():
+    if copy_monitor._is_running:
+        return {"status": "already_running", "message": "A copy trade scan is already in progress"}
+    result = await copy_monitor.poll_wallets()
+    return {"status": "completed", "result": result}
+
+
+@app.get("/api/copy-trade/status")
+async def copy_trade_status():
+    return await copy_monitor.get_status()
 
 
 # ── Static file serving ─────────────────────────────────────────

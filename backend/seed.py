@@ -105,7 +105,67 @@ CREATE TABLE IF NOT EXISTS scan_log (
     duration_seconds REAL,
     errors TEXT
 );
+
+CREATE TABLE IF NOT EXISTS copy_trade_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    description TEXT
+);
+
+CREATE TABLE IF NOT EXISTS copy_trade_signals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    detected_at TEXT DEFAULT (datetime('now')),
+    wallet_address TEXT NOT NULL,
+    wallet_username TEXT,
+    market_id TEXT,
+    market_slug TEXT,
+    market_title TEXT,
+    direction TEXT,
+    wallet_entry_price REAL,
+    current_market_price REAL,
+    liquidity_pool_usdc REAL,
+    volume_24h_usdc REAL,
+    unique_trader_count INTEGER,
+    resolution_date TEXT,
+    days_to_resolution INTEGER,
+    confirming_wallet_count INTEGER,
+    price_movement_6h_pct REAL,
+    wallet_position_pct_of_pool REAL,
+    all_filters_passed INTEGER DEFAULT 0,
+    filters_failed TEXT,
+    filter_results TEXT,
+    action_taken TEXT DEFAULT 'LOGGED',
+    notes TEXT
+);
+
+CREATE TABLE IF NOT EXISTS wallet_position_cache (
+    wallet_address TEXT,
+    condition_id TEXT,
+    outcome_index INTEGER,
+    first_seen_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (wallet_address, condition_id, outcome_index)
+);
 """
+
+COPY_TRADE_DEFAULTS = [
+    ("min_liquidity_usd", "75000", "Minimum liquidity pool size in USD"),
+    ("entry_timing_minutes", "5", "Max minutes since position opened"),
+    ("max_wallet_pool_pct", "5.0", "Max wallet position as % of pool"),
+    ("min_volume_24h_usd", "25000", "Minimum 24h volume in USD"),
+    ("min_unique_traders", "50", "Minimum unique traders in market"),
+    ("resolution_min_days", "3", "Minimum days to resolution"),
+    ("resolution_max_days", "45", "Maximum days to resolution"),
+    ("min_wallet_win_rate", "55.0", "Minimum wallet win rate %"),
+    ("min_resolved_markets", "20", "Minimum resolved markets for win rate"),
+    ("max_price_move_6h_pct", "12.0", "Max price movement in 6h %"),
+    ("min_confirming_wallets", "2", "Minimum confirming wallets"),
+    ("max_bankroll_pct", "5.0", "Max % of bankroll per trade"),
+    ("bankroll_usd", "10000", "Total simulated bankroll in USD"),
+    ("execution_mode", "MANUAL", "MANUAL or AUTO"),
+    ("poll_interval_minutes", "5", "How often to poll wallets"),
+    ("telegram_bot_token", "", "Telegram bot token for alerts"),
+    ("telegram_chat_id", "", "Telegram chat ID for alerts"),
+]
 
 
 def find_csv():
@@ -125,6 +185,15 @@ def seed():
     cursor.executescript(SCHEMA)
     conn.commit()
     print(f"[seed] Tables created in {DB_PATH}")
+
+    # Seed copy trade default settings
+    for key, value, desc in COPY_TRADE_DEFAULTS:
+        cursor.execute(
+            "INSERT OR IGNORE INTO copy_trade_settings (key, value, description) VALUES (?, ?, ?)",
+            (key, value, desc),
+        )
+    conn.commit()
+    print(f"[seed] Copy trade settings seeded ({len(COPY_TRADE_DEFAULTS)} defaults)")
 
     # Find and load CSV
     csv_path = find_csv()

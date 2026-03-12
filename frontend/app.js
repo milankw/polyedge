@@ -127,6 +127,7 @@ function renderCurrentTab() {
     case 'wallets': renderWallets(); break;
     case 'trades': renderTrades(); break;
     case 'analytics': renderAnalytics(); break;
+    case 'copytrade': renderCopyTrade(); break;
     case 'settings': renderSettings(); break;
   }
 }
@@ -391,6 +392,264 @@ function renderAnalytics() {
   drawTierChart(d.wallets);
   drawPnlDistChart(d.wallets);
   drawCumPnlChart(d.snapshots);
+}
+
+/* ── Copy Trading Tab ─────────────────────────────────────── */
+var copyTradeState = {
+  signals: null,
+  settings: null,
+  status: null,
+  subTab: 'signals',
+  loading: false,
+};
+
+async function fetchCopyTradeData() {
+  copyTradeState.loading = true;
+  try {
+    var [signalsResp, settingsResp, statusResp] = await Promise.all([
+      fetch(API + '/copy-trade/signals'),
+      fetch(API + '/copy-trade/settings'),
+      fetch(API + '/copy-trade/status'),
+    ]);
+    copyTradeState.signals = await signalsResp.json();
+    copyTradeState.settings = await settingsResp.json();
+    copyTradeState.status = await statusResp.json();
+  } catch (e) {
+    console.error('Failed to fetch copy trade data:', e);
+  }
+  copyTradeState.loading = false;
+}
+
+async function renderCopyTrade() {
+  $('#main-content').innerHTML = '<div class="loading">Loading copy trade data...</div>';
+  await fetchCopyTradeData();
+
+  var st = copyTradeState.status || {};
+  var html = '';
+
+  // Header with KPIs
+  html += '<div class="ct-header">';
+  html += '<h2>Copy Trading</h2>';
+  html += '<button class="btn btn-primary" id="ct-scan-btn" onclick="triggerCopyTradeScan()">Run Scan Now</button>';
+  html += '</div>';
+
+  html += '<div class="kpi-row">';
+  html += kpiCard('Mode', st.execution_mode || 'MANUAL', 'neutral', '');
+  html += kpiCard('Signals (24h)', String(st.signals_24h || 0), 'neutral', (st.passed_24h || 0) + ' passed');
+  html += kpiCard('Active Wallets', String(st.active_wallets || 0), 'neutral', '');
+  html += kpiCard('Cached Positions', String(st.cached_positions || 0), 'neutral', '');
+  html += kpiCard('Last Poll', st.last_poll ? timeAgo(st.last_poll) : 'Never', 'neutral', 'Every ' + (st.poll_interval || 5) + 'm');
+  html += '</div>';
+
+  // Sub-tabs
+  html += '<div class="ct-subtabs">';
+  html += '<button class="ct-subtab' + (copyTradeState.subTab === 'signals' ? ' active' : '') + '" onclick="switchCopyTradeSubTab(\'signals\')">Live Signals Feed</button>';
+  html += '<button class="ct-subtab' + (copyTradeState.subTab === 'wallets' ? ' active' : '') + '" onclick="switchCopyTradeSubTab(\'wallets\')">Wallet Manager</button>';
+  html += '<button class="ct-subtab' + (copyTradeState.subTab === 'filters' ? ' active' : '') + '" onclick="switchCopyTradeSubTab(\'filters\')">Filter Settings</button>';
+  html += '</div>';
+
+  // Sub-tab content
+  html += '<div id="ct-content">';
+  html += renderCopyTradeSubContent();
+  html += '</div>';
+
+  $('#main-content').innerHTML = html;
+}
+
+function switchCopyTradeSubTab(sub) {
+  copyTradeState.subTab = sub;
+  $$('.ct-subtab').forEach(function(el) {
+    el.classList.toggle('active', el.textContent.toLowerCase().indexOf(sub === 'signals' ? 'signal' : sub === 'wallets' ? 'wallet' : 'filter') >= 0);
+  });
+  $('#ct-content').innerHTML = renderCopyTradeSubContent();
+}
+
+function renderCopyTradeSubContent() {
+  switch (copyTradeState.subTab) {
+    case 'signals': return renderCTSignals();
+    case 'wallets': return renderCTWallets();
+    case 'filters': return renderCTFilters();
+    default: return '';
+  }
+}
+
+function renderCTSignals() {
+  var signals = copyTradeState.signals || [];
+  var html = '<div class="panel"><div class="panel-header"><h2>Signals (' + signals.length + ')</h2></div>';
+  html += '<div class="panel-body" style="padding:0;overflow-x:auto;">';
+  html += '<table class="data-table ct-signals-table"><thead><tr>';
+  html += '<th>Time</th><th>Wallet</th><th>Market</th><th>Direction</th><th>Entry</th><th>Market Price</th><th>Filters</th><th>Action</th><th></th>';
+  html += '</tr></thead><tbody>';
+
+  if (signals.length === 0) {
+    html += '<tr><td colspan="9" class="empty-state">No signals yet. Run a scan to detect copy trade opportunities.</td></tr>';
+  } else {
+    signals.forEach(function(s) {
+      var passed = s.all_filters_passed;
+      var rowClass = passed ? 'ct-row-passed' : 'ct-row-failed';
+      html += '<tr class="' + rowClass + ' ct-signal-row" data-signal-id="' + s.id + '">';
+      html += '<td>' + timeAgo(s.detected_at) + '</td>';
+      html += '<td>' + (s.wallet_username || truncAddr(s.wallet_address)) + '</td>';
+      html += '<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis">' + (s.market_title || s.market_slug || '—') + '</td>';
+      html += '<td><span class="activity-side ' + (s.direction || 'buy') + '">' + (s.direction || '—') + '</span></td>';
+      html += '<td>' + fmt(s.wallet_entry_price, 4) + '</td>';
+      html += '<td>' + fmt(s.current_market_price, 4) + '</td>';
+      html += '<td>' + (passed ? '<span class="ct-badge ct-passed">ALL PASSED</span>' : '<span class="ct-badge ct-failed">' + (s.filters_failed || 'FAILED') + '</span>') + '</td>';
+      html += '<td>' + statusBadge(s.action_taken) + '</td>';
+      html += '<td><button class="btn btn-sm" onclick="toggleSignalDetail(' + s.id + ')">Details</button></td>';
+      html += '</tr>';
+      html += '<tr class="ct-detail-row" id="ct-detail-' + s.id + '" style="display:none"><td colspan="9"><div class="ct-detail-content" id="ct-detail-content-' + s.id + '">Loading...</div></td></tr>';
+    });
+  }
+
+  html += '</tbody></table></div></div>';
+  return html;
+}
+
+async function toggleSignalDetail(id) {
+  var row = document.getElementById('ct-detail-' + id);
+  if (!row) return;
+  if (row.style.display === 'none') {
+    row.style.display = '';
+    var content = document.getElementById('ct-detail-content-' + id);
+    try {
+      var resp = await fetch(API + '/copy-trade/signals/' + id);
+      var detail = await resp.json();
+      content.innerHTML = renderSignalDetailContent(detail);
+    } catch (e) {
+      content.innerHTML = '<div class="empty-state">Failed to load details</div>';
+    }
+  } else {
+    row.style.display = 'none';
+  }
+}
+
+function renderSignalDetailContent(detail) {
+  var html = '<div class="ct-filter-results">';
+  html += '<h3>Filter Results</h3>';
+  var filters = detail.filter_results || {};
+  var filterKeys = Object.keys(filters);
+  if (filterKeys.length === 0) {
+    html += '<p style="color:var(--text-muted)">No filter data available</p>';
+  } else {
+    html += '<div class="ct-filter-grid">';
+    filterKeys.forEach(function(key) {
+      var f = filters[key];
+      var statusClass = f.status === 'PASSED' ? 'ct-filter-passed' : f.status === 'PENDING' ? 'ct-filter-pending' : 'ct-filter-failed';
+      html += '<div class="ct-filter-item ' + statusClass + '">';
+      html += '<div class="ct-filter-name">' + key.replace(/_/g, ' ') + '</div>';
+      html += '<div class="ct-filter-status">' + f.status + '</div>';
+      html += '<div class="ct-filter-detail">';
+      if (f.value != null) html += 'Value: ' + f.value;
+      if (f.threshold != null) html += ' | Threshold: ' + f.threshold;
+      html += '</div>';
+      if (f.message) html += '<div class="ct-filter-msg">' + f.message + '</div>';
+      html += '</div>';
+    });
+    html += '</div>';
+  }
+
+  // Market info
+  html += '<div class="ct-market-info" style="margin-top:var(--gap-lg)">';
+  html += '<h3>Market Details</h3>';
+  html += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:var(--gap-md)">';
+  html += '<div><span style="color:var(--text-muted)">Liquidity:</span> $' + fmt(detail.liquidity_pool_usdc) + '</div>';
+  html += '<div><span style="color:var(--text-muted)">24h Volume:</span> $' + fmt(detail.volume_24h_usdc) + '</div>';
+  html += '<div><span style="color:var(--text-muted)">Unique Traders:</span> ' + (detail.unique_trader_count || '—') + '</div>';
+  html += '<div><span style="color:var(--text-muted)">Days to Resolution:</span> ' + (detail.days_to_resolution || '—') + '</div>';
+  html += '<div><span style="color:var(--text-muted)">6h Price Move:</span> ' + fmtPct(detail.price_movement_6h_pct) + '</div>';
+  html += '<div><span style="color:var(--text-muted)">Confirming Wallets:</span> ' + (detail.confirming_wallet_count || '—') + '</div>';
+  html += '</div></div>';
+
+  html += '</div>';
+  return html;
+}
+
+function renderCTWallets() {
+  var d = state.data;
+  if (!d || !d.wallets) return '<div class="empty-state">No wallet data available</div>';
+
+  var wallets = d.wallets;
+  var html = '<div class="panel"><div class="panel-header"><h2>Tracked Wallets (' + wallets.length + ')</h2></div>';
+  html += '<div class="panel-body" style="padding:0;overflow-x:auto;">';
+  html += '<table class="data-table"><thead><tr>';
+  html += '<th>#</th><th>Wallet</th><th>Score</th><th>Win Rate</th><th>PnL</th><th>Markets</th><th>Active</th>';
+  html += '</tr></thead><tbody>';
+
+  wallets.forEach(function(w, i) {
+    html += '<tr class="clickable" onclick="openWallet(' + w.id + ')">';
+    html += '<td>' + (i + 1) + '</td>';
+    html += '<td><strong>' + (w.username || truncAddr(w.address)) + '</strong><br><span style="color:var(--text-muted);font-size:var(--fs-xs)">' + truncAddr(w.address) + '</span></td>';
+    html += '<td>' + fmt(w.score, 1) + '</td>';
+    html += '<td>' + fmtPct(w.csv_win_rate) + '</td>';
+    html += '<td class="' + pnlClass(w.csv_pnl) + '">' + fmtUsd(w.csv_pnl) + '</td>';
+    html += '<td>' + (w.csv_unique_markets || 0) + '</td>';
+    html += '<td>' + (w.is_active ? '<span class="ct-badge ct-passed">Yes</span>' : '<span class="ct-badge ct-failed">No</span>') + '</td>';
+    html += '</tr>';
+  });
+
+  html += '</tbody></table></div></div>';
+  return html;
+}
+
+function renderCTFilters() {
+  var settings = copyTradeState.settings || {};
+  var keys = Object.keys(settings);
+  if (keys.length === 0) return '<div class="empty-state">No settings loaded</div>';
+
+  var html = '<div class="panel"><div class="panel-header"><h2>Filter Settings</h2>';
+  html += '<button class="btn btn-primary" onclick="saveCopyTradeSettings()">Save Settings</button>';
+  html += '</div><div class="panel-body">';
+  html += '<div class="ct-settings-grid">';
+
+  keys.forEach(function(key) {
+    var s = settings[key];
+    var val = s.value != null ? s.value : '';
+    var desc = s.description || '';
+    html += '<div class="ct-setting-item">';
+    html += '<label class="ct-setting-label" for="ct-set-' + key + '">' + key.replace(/_/g, ' ') + '</label>';
+    html += '<div class="ct-setting-desc">' + desc + '</div>';
+    html += '<input class="ct-setting-input" id="ct-set-' + key + '" data-key="' + key + '" value="' + val + '" />';
+    html += '</div>';
+  });
+
+  html += '</div></div></div>';
+  return html;
+}
+
+async function saveCopyTradeSettings() {
+  var inputs = document.querySelectorAll('.ct-setting-input');
+  var updates = {};
+  inputs.forEach(function(input) {
+    updates[input.dataset.key] = input.value;
+  });
+
+  try {
+    var resp = await fetch(API + '/copy-trade/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updates),
+    });
+    var result = await resp.json();
+    alert('Settings saved: ' + (result.updated || 0) + ' updated');
+    await fetchCopyTradeData();
+  } catch (e) {
+    alert('Error saving settings: ' + e.message);
+  }
+}
+
+async function triggerCopyTradeScan() {
+  var btn = document.getElementById('ct-scan-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Scanning...'; }
+  try {
+    var resp = await fetch(API + '/copy-trade/scan', { method: 'POST' });
+    var result = await resp.json();
+    alert(JSON.stringify(result, null, 2));
+    renderCopyTrade();
+  } catch (e) {
+    alert('Error: ' + e.message);
+  }
+  if (btn) { btn.disabled = false; btn.textContent = 'Run Scan Now'; }
 }
 
 /* ── Settings Tab ──────────────────────────────────────────── */
@@ -666,3 +925,7 @@ document.addEventListener('DOMContentLoaded', function() {
 window.openWallet = openWallet;
 window.triggerAction = triggerAction;
 window.filterWalletTrades = filterWalletTrades;
+window.switchCopyTradeSubTab = switchCopyTradeSubTab;
+window.toggleSignalDetail = toggleSignalDetail;
+window.saveCopyTradeSettings = saveCopyTradeSettings;
+window.triggerCopyTradeScan = triggerCopyTradeScan;
