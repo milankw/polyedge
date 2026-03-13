@@ -10,7 +10,8 @@ Discovery sources (rotated each cycle):
 
 Speed optimisations:
   - In-memory seen-set avoids DB round-trips for already-scanned wallets
-  - Parallel evaluation via asyncio.gather (batch of 5 at a time)
+  - Parallel evaluation via asyncio.gather (batch of 15 at a time)
+  - Pre-filter: quick positions check skips wallets with < 5 positions
   - Adaptive rate limiting (backs off on 429, speeds up when clear)
 """
 import asyncio
@@ -52,10 +53,10 @@ class WalletScout:
 
         # Settings loaded from DB
         self._min_score: float = 45.0
-        self._max_per_cycle: int = 50
-        self._cycle_delay: int = 30
-        self._eval_delay: float = 1.0
-        self._parallel_evals: int = 5
+        self._max_per_cycle: int = 200
+        self._cycle_delay: int = 10
+        self._eval_delay: float = 0.5
+        self._parallel_evals: int = 10
 
         # Rotate discovery sources
         self._source_index: int = 0
@@ -100,10 +101,10 @@ class WalletScout:
             rows = await cur.fetchall()
         settings = {r["key"]: r["value"] for r in rows}
         self._min_score = float(settings.get("min_score_threshold", "45"))
-        self._max_per_cycle = int(settings.get("max_wallets_per_cycle", "50"))
-        self._cycle_delay = int(settings.get("cycle_delay_seconds", "30"))
-        self._eval_delay = float(settings.get("eval_delay_seconds", "1"))
-        self._parallel_evals = int(settings.get("parallel_evals", "5"))
+        self._max_per_cycle = int(settings.get("max_wallets_per_cycle", "200"))
+        self._cycle_delay = int(settings.get("cycle_delay_seconds", "10"))
+        self._eval_delay = float(settings.get("eval_delay_seconds", "0.5"))
+        self._parallel_evals = int(settings.get("parallel_evals", "10"))
 
     async def _load_seen_wallets(self):
         """Load all previously scanned wallets into memory on startup."""
@@ -504,6 +505,32 @@ class WalletScout:
             "score_breakdown": json.dumps(breakdown),
         }
 
+    # ---- Pre-filter (cheap) -------------------------------------------
+
+    async def _quick_check(self, address: str) -> bool:
+        """Quick check: fetch positions count. Skip if < 5 positions (too small)."""
+        data = await self._api_get(
+            f"{DATA_API}/positions",
+            params={"user": address},
+        )
+        if data is None:
+            return False
+        if not isinstance(data, list):
+            return False
+        return len(data) >= 5
+
+    async def _prefilter_batch(self, addresses: list[str]) -> list[str]:
+        """Run quick check on a batch in parallel, return those that pass."""
+        tasks = [self._quick_check(addr) for addr in addresses]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        passed = []
+        for addr, result in zip(addresses, results):
+            if result is True:
+                passed.append(addr)
+            # Mark failed ones as seen so we dont re-check
+            self._seen_wallets.add(addr.lower())
+        return passed
+
     # ---- Parallel evaluation -----------------------------------------
 
     async def _evaluate_batch(self, addresses: list[str]) -> list[dict]:
@@ -601,20 +628,40 @@ class WalletScout:
         if not new_wallets:
             return
 
-        # Evaluate in parallel batches
-        to_eval = new_wallets[:self._max_per_cycle]
+        to_check = new_wallets[:self._max_per_cycle]
         queued = 0
-        batch_size = self._parallel_evals
+        prefilter_batch = 5  # conservative to avoid 429s after discovery burst
+        eval_batch = self._parallel_evals
 
-        for i in range(0, len(to_eval), batch_size):
+        # Cool down after discovery burst
+        await asyncio.sleep(2.0)
+        evaluated = 0
+        prefilter_passed = 0
+
+        # Phase 1: Pre-filter in large parallel batches (1 API call each)
+        candidates = []
+        for i in range(0, len(to_check), prefilter_batch):
+            if not self._running:
+                break
+            batch = to_check[i:i + prefilter_batch]
+            passed = await self._prefilter_batch(batch)
+            candidates.extend(passed)
+            prefilter_passed += len(passed)
+            await asyncio.sleep(0.5)
+
+        logger.info(f"Pre-filter: {len(to_check)} checked -> {prefilter_passed} have 5+ positions")
+
+        # Phase 2: Full evaluation of pre-filtered candidates
+        for i in range(0, len(candidates), eval_batch):
             if not self._running:
                 break
 
-            batch = to_eval[i:i + batch_size]
+            batch = candidates[i:i + eval_batch]
             results = await self._evaluate_batch(batch)
 
             for result in results:
                 self._total_scanned += 1
+                evaluated += 1
                 addr = result["proxy_wallet"].lower()
                 self._seen_wallets.add(addr)
 
@@ -625,15 +672,12 @@ class WalletScout:
                     queued += 1
                     logger.info(f"QUEUED: {result['username'] or addr[:12]}... score={score} wr={result['win_rate']}% pnl=${result['total_pnl']:,.0f}")
 
-            # Mark unscorable wallets as seen too
-            for addr in batch:
-                self._seen_wallets.add(addr.lower())
-
             await asyncio.sleep(self._eval_delay)
 
         self._last_cycle_queued = queued
         elapsed = time.monotonic() - cycle_start
-        logger.info(f"Cycle {self._cycle_count} done: {len(to_eval)} evaluated, {queued} queued in {elapsed:.1f}s (seen total: {len(self._seen_wallets)})")
+        logger.info(f"Cycle {self._cycle_count} done: {len(to_check)} checked, {prefilter_passed} passed filter, {evaluated} evaluated, {queued} queued in {elapsed:.1f}s (seen: {len(self._seen_wallets)})")
+        self._last_cycle_evaluated = evaluated
 
     def stop_loop(self):
         self._running = False

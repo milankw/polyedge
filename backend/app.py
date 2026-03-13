@@ -845,16 +845,23 @@ async def scout_approve(data: dict):
 
     candidate = rows[0]
 
+    # Compute tier from scout score
+    sc = candidate.get("score") or 0
+    tier = "Prime" if sc >= 90 else "Core" if sc >= 75 else "Opportunistic" if sc >= 60 else "Watchlist" if sc >= 45 else ""
+
     # Insert into wallets table for tracking
     try:
         await _execute(
             """INSERT OR IGNORE INTO wallets
-                (address, username, score, csv_win_rate, csv_pnl, csv_volume, csv_unique_markets, profile_url)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (address, username, score, wallet_score, wallet_tier,
+                 csv_win_rate, csv_pnl, csv_volume, csv_unique_markets, profile_url)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 wallet,
                 candidate.get("username") or "",
-                candidate.get("score") or 0,
+                sc,
+                sc,
+                tier,
                 candidate.get("win_rate") or 0,
                 candidate.get("total_pnl") or 0,
                 candidate.get("total_invested") or 0,
