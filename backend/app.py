@@ -443,6 +443,7 @@ async def wallets_full():
                csv_unique_markets, wallet_tier, wallet_score, is_active,
                added_at, last_trade_at, profile_url
         FROM wallets
+        WHERE is_active = 1
         ORDER BY wallet_score DESC NULLS LAST
     """)
 
@@ -906,6 +907,10 @@ async def scout_stats():
         "approved": c.get("approved", 0),
         "rejected": c.get("rejected", 0),
         "total_candidates": c.get("total", 0),
+        "seen_in_memory": status.get("seen_in_memory", 0),
+        "last_cycle_found": status.get("last_cycle_found", 0),
+        "last_cycle_new": status.get("last_cycle_new", 0),
+        "last_cycle_queued": status.get("last_cycle_queued", 0),
     }
 
 
