@@ -1,369 +1,436 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="dark">
+<html lang="en">
 <head>
-<!--
-   ______                            __
-  / ____/___  ____ ___  ____  __  __/ /____  _____
- / /   / __ \/ __ `__ \/ __ \/ / / / __/ _ \/ ___/
-/ /___/ /_/ / / / / / / /_/ / /_/ / /_/  __/ /
-\____/\____/_/ /_/ /_/ .___/\__,_/\__/\___/_/
-                    /_/
-        Created with Perplexity Computer
-        https://www.perplexity.ai/computer
--->
-
-<!-- Perplexity Computer Attribution — SEO Meta Tags -->
-<meta name="generator" content="Perplexity Computer">
-<meta name="author" content="Perplexity Computer">
-<meta property="og:see_also" content="https://www.perplexity.ai/computer">
-<link rel="author" href="https://www.perplexity.ai/computer">
-
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Polymarket Prediction Engine</title>
-<link rel="stylesheet" href="./base.css">
-<link rel="stylesheet" href="./style.css">
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PolyEdge — Copy Trading</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/base.css">
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 </head>
 <body>
-<div class="dashboard">
-  <!-- Sidebar -->
-  <aside class="sidebar">
-    <div class="sidebar-logo">
-      <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <rect width="32" height="32" rx="8" fill="currentColor" style="color: var(--color-primary)"/>
-        <path d="M8 16L14 10L20 16L14 22Z" fill="var(--color-bg)" stroke="var(--color-bg)" stroke-width="1"/>
-        <path d="M14 16L20 10L26 16L20 22Z" fill="var(--color-bg)" opacity="0.5"/>
-      </svg>
-      <span>POLYEDGE</span>
+
+  <!-- Top Bar -->
+  <header class="top-bar">
+    <div class="top-bar-left">
+      <span class="logo">POLYEDGE</span>
+      <span class="separator">|</span>
+      <span class="stat">LOOP: <span id="loop-indicator" class="loop-dot"></span> <span id="stat-cycle" class="num">—</span></span>
+      <span class="separator">|</span>
+      <span class="stat">TODAY: <span id="stat-today" class="num">0</span></span>
+      <span class="separator">|</span>
+      <span class="stat">WIN: <span id="stat-win" class="num">0%</span></span>
     </div>
-
-    <div class="sidebar-section">Trading</div>
-    <ul class="sidebar-nav" role="list">
-      <li><button class="active" onclick="switchView('dashboard')" data-view="dashboard">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
-        Dashboard
-      </button></li>
-      <li><button onclick="switchView('scanner')" data-view="scanner">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
-        Market Scanner
-      </button></li>
-      <li><button onclick="switchView('opportunities')" data-view="opportunities">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
-        Opportunities
-      </button></li>
-      <li><button onclick="switchView('positions')" data-view="positions">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
-        Positions
-      </button></li>
-    </ul>
-
-    <div class="sidebar-section">Analysis</div>
-    <ul class="sidebar-nav" role="list">
-      <li><button onclick="switchView('strategies')" data-view="strategies">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
-        Strategies
-      </button></li>
-      <li><button onclick="switchView('settings')" data-view="settings">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
-        Settings
-      </button></li>
-    </ul>
-
-    <div class="sidebar-footer">
-      <div style="font-size: var(--text-xs); color: var(--color-text-muted); display: flex; align-items: center;">
-        <span class="status-dot" id="statusDot"></span>
-        <span id="engineStatus">Connecting...</span>
-      </div>
-    </div>
-  </aside>
-
-  <!-- Header -->
-  <header class="header">
-    <h1 class="header-title" id="pageTitle">Dashboard</h1>
-    <div class="header-actions">
-      <button class="btn btn-ghost btn-sm" onclick="refreshData()" id="refreshBtn">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-        Refresh
-      </button>
-      <button class="btn btn-primary btn-sm" onclick="runScan()">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
-        Scan Now
-      </button>
-      <button class="theme-toggle" data-theme-toggle aria-label="Toggle theme">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
-      </button>
+    <div class="top-bar-right">
+      <button id="btn-loop" class="btn-loop" onclick="toggleLoop()">▶</button>
     </div>
   </header>
 
-  <!-- Main Content -->
-  <main class="main">
-
-    <!-- Dashboard View -->
-    <section id="view-dashboard" class="view-section active">
-      <div class="kpi-grid" id="kpiGrid">
-        <div class="kpi-card">
-          <div class="kpi-label">Total P&L</div>
-          <div class="kpi-value neutral" id="kpi-total-pnl">$0.00</div>
-          <div class="kpi-delta flat" id="kpi-total-pnl-delta">Loading...</div>
-        </div>
-        <div class="kpi-card">
-          <div class="kpi-label">Open Positions</div>
-          <div class="kpi-value neutral" id="kpi-open-positions">0</div>
-          <div class="kpi-delta flat" id="kpi-exposure">$0 exposure</div>
-        </div>
-        <div class="kpi-card">
-          <div class="kpi-label">Win Rate</div>
-          <div class="kpi-value neutral" id="kpi-win-rate">0%</div>
-          <div class="kpi-delta flat" id="kpi-record">0W / 0L</div>
-        </div>
-        <div class="kpi-card">
-          <div class="kpi-label">Active Signals</div>
-          <div class="kpi-value neutral" id="kpi-signals">—</div>
-          <div class="kpi-delta flat" id="kpi-signals-detail">Scan to detect</div>
-        </div>
+  <!-- Budget Bar -->
+  <section class="budget-bar">
+    <div class="budget-item">
+      <span class="budget-label">ACCOUNT</span>
+      <span class="budget-value" id="budget-account">$1,000.00</span>
+    </div>
+    <div class="budget-divider"></div>
+    <div class="budget-item">
+      <span class="budget-label">CASH</span>
+      <span class="budget-value" id="budget-cash">$1,000.00</span>
+    </div>
+    <div class="budget-divider"></div>
+    <div class="budget-item">
+      <span class="budget-label">IN POSITIONS</span>
+      <span class="budget-value" id="budget-positions">$0.00</span>
+      <span class="budget-count" id="budget-pos-count">0 open</span>
+    </div>
+    <div class="budget-divider"></div>
+    <div class="budget-item">
+      <span class="budget-label">P&L</span>
+      <span class="budget-value" id="budget-pnl">$0.00</span>
+      <span class="budget-count" id="budget-pnl-detail">R: $0 / U: $0</span>
+    </div>
+    <div class="budget-divider"></div>
+    <div class="budget-item">
+      <span class="budget-label">PER TRADE</span>
+      <span class="budget-value" id="budget-trade-size">$5–$100</span>
+      <span class="budget-count" id="budget-sizing-mode">proportional</span>
+    </div>
+    <div class="budget-progress-wrap">
+      <div class="budget-progress">
+        <div class="budget-progress-positions" id="budget-bar-positions" style="width: 0%"></div>
+        <div class="budget-progress-pnl" id="budget-bar-pnl" style="width: 0%"></div>
       </div>
-
-      <div class="grid-2" style="margin-bottom: var(--space-6);">
-        <div class="card">
-          <div class="card-header">
-            <span class="card-title">P&L History</span>
-          </div>
-          <div class="chart-container">
-            <canvas id="pnlChart"></canvas>
-          </div>
-        </div>
-        <div class="card">
-          <div class="card-header">
-            <span class="card-title">Top Opportunities</span>
-            <button class="btn btn-ghost btn-sm" onclick="switchView('opportunities')">View All</button>
-          </div>
-          <div id="topOpportunities">
-            <div class="empty-state">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
-              <p>Run a scan to discover opportunities</p>
-            </div>
-          </div>
-        </div>
+      <div class="budget-progress-labels">
+        <span>$0</span>
+        <span id="budget-bankroll-label">$1,000</span>
       </div>
+    </div>
+  </section>
 
-      <div class="card">
-        <div class="card-header">
-          <span class="card-title">Recent Positions</span>
-          <button class="btn btn-ghost btn-sm" onclick="switchView('positions')">View All</button>
-        </div>
-        <div id="recentPositions">
-          <div class="empty-state">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
-            <p>No positions yet — place your first trade</p>
-          </div>
-        </div>
+  <!-- Mode Selector -->
+  <section class="mode-selector" id="mode-selector">
+    <button class="mode-btn active" data-mode="" onclick="selectMode('')">All</button>
+    <button class="mode-btn mode-strict" data-mode="strict" onclick="selectMode('strict')">Strict</button>
+    <button class="mode-btn mode-moderate" data-mode="moderate" onclick="selectMode('moderate')">Moderate</button>
+    <button class="mode-btn mode-aggressive" data-mode="aggressive" onclick="selectMode('aggressive')">Aggressive</button>
+  </section>
+
+  <!-- Mode Comparison Cards -->
+  <section class="mode-comparison" id="mode-comparison">
+    <div class="mode-card mode-card-strict" id="mc-strict">
+      <div class="mode-card-header"><span class="mode-badge badge-strict">STRICT</span></div>
+      <div class="mode-card-stats">
+        <div><span class="mc-label">Trades</span><span class="mc-val" id="mc-strict-trades">0</span></div>
+        <div><span class="mc-label">Win Rate</span><span class="mc-val" id="mc-strict-wr">0%</span></div>
+        <div><span class="mc-label">Realized</span><span class="mc-val" id="mc-strict-rpnl">$0</span></div>
+        <div><span class="mc-label">Unrealized</span><span class="mc-val" id="mc-strict-upnl">$0</span></div>
+        <div><span class="mc-label">Open</span><span class="mc-val" id="mc-strict-open">0</span></div>
+      </div>
+    </div>
+    <div class="mode-card mode-card-moderate" id="mc-moderate">
+      <div class="mode-card-header"><span class="mode-badge badge-moderate">MODERATE</span></div>
+      <div class="mode-card-stats">
+        <div><span class="mc-label">Trades</span><span class="mc-val" id="mc-moderate-trades">0</span></div>
+        <div><span class="mc-label">Win Rate</span><span class="mc-val" id="mc-moderate-wr">0%</span></div>
+        <div><span class="mc-label">Realized</span><span class="mc-val" id="mc-moderate-rpnl">$0</span></div>
+        <div><span class="mc-label">Unrealized</span><span class="mc-val" id="mc-moderate-upnl">$0</span></div>
+        <div><span class="mc-label">Open</span><span class="mc-val" id="mc-moderate-open">0</span></div>
+      </div>
+    </div>
+    <div class="mode-card mode-card-aggressive" id="mc-aggressive">
+      <div class="mode-card-header"><span class="mode-badge badge-aggressive">AGGRESSIVE</span></div>
+      <div class="mode-card-stats">
+        <div><span class="mc-label">Trades</span><span class="mc-val" id="mc-aggressive-trades">0</span></div>
+        <div><span class="mc-label">Win Rate</span><span class="mc-val" id="mc-aggressive-wr">0%</span></div>
+        <div><span class="mc-label">Realized</span><span class="mc-val" id="mc-aggressive-rpnl">$0</span></div>
+        <div><span class="mc-label">Unrealized</span><span class="mc-val" id="mc-aggressive-upnl">$0</span></div>
+        <div><span class="mc-label">Open</span><span class="mc-val" id="mc-aggressive-open">0</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Tab Navigation -->
+  <nav class="tab-nav">
+    <button class="tab-btn active" data-tab="live" onclick="switchTab('live')">Live</button>
+    <button class="tab-btn" data-tab="wallets" onclick="switchTab('wallets')">Wallets</button>
+    <button class="tab-btn" data-tab="analysis" onclick="switchTab('analysis')">Analysis</button>
+    <button class="tab-btn" data-tab="scout" onclick="switchTab('scout')">Scout</button>
+    <button class="tab-btn" data-tab="filters" onclick="switchTab('filters')">Filters</button>
+  </nav>
+
+  <!-- Live Tab -->
+  <main id="tab-live" class="content tab-content active">
+    <section class="feed-section">
+      <h2 class="section-title">LIVE FEED</h2>
+      <div id="feed-container" class="feed-container">
+        <div class="feed-empty">Waiting for trades...</div>
       </div>
     </section>
 
-    <!-- Scanner View -->
-    <section id="view-scanner" class="view-section">
-      <div class="tab-filters" id="categoryTabs">
-        <button class="tab-filter active" onclick="filterMarkets('all')">All Markets</button>
-        <button class="tab-filter" onclick="filterMarkets('sports')">Sports</button>
-        <button class="tab-filter" onclick="filterMarkets('crypto')">Crypto</button>
-        <button class="tab-filter" onclick="filterMarkets('politics')">Politics</button>
-        <button class="tab-filter" onclick="filterMarkets('entertainment')">Entertainment</button>
-      </div>
-      <div class="card">
-        <div class="card-header">
-          <span class="card-title">Live Markets</span>
-          <div style="display: flex; gap: var(--space-2); align-items: center;">
-            <span id="marketCount" style="font-size: var(--text-xs); color: var(--color-text-muted);"></span>
-            <button class="btn btn-ghost btn-sm" onclick="loadMarkets()">Refresh</button>
-          </div>
-        </div>
-        <div style="overflow-x: auto;">
-          <table class="data-table" id="marketsTable">
-            <thead>
-              <tr>
-                <th>Market</th>
-                <th>YES</th>
-                <th>NO</th>
-                <th>Volume</th>
-                <th>Edge</th>
-                <th>Confidence</th>
-                <th>Signals</th>
-              </tr>
-            </thead>
-            <tbody id="marketsBody">
-              <tr><td colspan="7" style="text-align: center; padding: var(--space-8); color: var(--color-text-muted);">Loading markets...</td></tr>
-            </tbody>
-          </table>
-        </div>
+    <!-- Open Positions -->
+    <section class="positions-section">
+      <h2 class="section-title">OPEN POSITIONS</h2>
+      <div class="table-wrap">
+        <table class="data-table" id="open-table">
+          <thead>
+            <tr>
+              <th>Market</th>
+              <th>Dir</th>
+              <th>Entry</th>
+              <th>Current</th>
+              <th>Size</th>
+              <th>Gross</th>
+              <th>Fees</th>
+              <th>Net</th>
+              <th>Delay</th>
+            </tr>
+          </thead>
+          <tbody id="open-body"></tbody>
+        </table>
       </div>
     </section>
 
-    <!-- Opportunities View -->
-    <section id="view-opportunities" class="view-section">
-      <div class="card">
-        <div class="card-header">
-          <span class="card-title">Detected Opportunities</span>
-          <div style="display: flex; gap: var(--space-2); align-items: center;">
-            <span id="oppCount" style="font-size: var(--text-xs); color: var(--color-text-muted);"></span>
-            <button class="btn btn-primary btn-sm" onclick="runScan()">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
-              Scan
-            </button>
-          </div>
-        </div>
-        <div id="opportunitiesList">
-          <div class="empty-state">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
-            <p>Click Scan to find mispriced markets</p>
-          </div>
-        </div>
+    <!-- Closed Trades -->
+    <section class="positions-section">
+      <h2 class="section-title">CLOSED TRADES</h2>
+      <div class="table-wrap">
+        <table class="data-table" id="closed-table">
+          <thead>
+            <tr>
+              <th>Market</th>
+              <th>Dir</th>
+              <th>Entry</th>
+              <th>Exit</th>
+              <th>Size</th>
+              <th>Gross</th>
+              <th>Fees</th>
+              <th>Net</th>
+              <th>Delay</th>
+            </tr>
+          </thead>
+          <tbody id="closed-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <!-- Analysis Tab -->
+  <main id="tab-analysis" class="content tab-content">
+
+    <!-- KPI Summary Cards -->
+    <section class="analysis-kpis" id="analysis-kpis">
+      <div class="kpi-card">
+        <div class="kpi-label">Total P&L</div>
+        <div class="kpi-value" id="a-total-pnl">—</div>
+        <div class="kpi-sub" id="a-pnl-detail">realized + unrealized</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Win Rate</div>
+        <div class="kpi-value" id="a-win-rate">—</div>
+        <div class="kpi-sub" id="a-record">0W / 0L</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Profit Factor</div>
+        <div class="kpi-value" id="a-profit-factor">—</div>
+        <div class="kpi-sub">wins / losses</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">ROI</div>
+        <div class="kpi-value" id="a-roi">—</div>
+        <div class="kpi-sub" id="a-invested">$0 invested</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Avg Win / Loss</div>
+        <div class="kpi-value" id="a-avg-wl">—</div>
+        <div class="kpi-sub" id="a-best-worst">best / worst</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Tracking Since</div>
+        <div class="kpi-value" id="a-tracking">—</div>
+        <div class="kpi-sub" id="a-hold-time">avg hold time</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Avg Trade Score</div>
+        <div class="kpi-value" id="a-avg-score">—</div>
+        <div class="kpi-sub">passed trades</div>
       </div>
     </section>
 
-    <!-- Positions View -->
-    <section id="view-positions" class="view-section">
-      <div class="tab-filters">
-        <button class="tab-filter active" onclick="loadPositions('open')">Open</button>
-        <button class="tab-filter" onclick="loadPositions('won')">Won</button>
-        <button class="tab-filter" onclick="loadPositions('lost')">Lost</button>
-      </div>
-      <div class="card">
-        <div class="card-header">
-          <span class="card-title">Positions</span>
-        </div>
-        <div style="overflow-x: auto;">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>Market</th>
-                <th>Side</th>
-                <th>Entry</th>
-                <th>Current</th>
-                <th>Size</th>
-                <th>P&L</th>
-                <th>Strategy</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody id="positionsBody">
-              <tr><td colspan="8" style="text-align: center; padding: var(--space-8); color: var(--color-text-muted);">No positions</td></tr>
-            </tbody>
-          </table>
-        </div>
+    <!-- Daily P&L Chart -->
+    <section class="analysis-chart-section">
+      <h2 class="section-title">DAILY P&L</h2>
+      <div class="chart-wrap" id="daily-chart-wrap">
+        <canvas id="dailyPnlChart"></canvas>
+        <div id="daily-chart-empty" class="chart-empty">Not enough data yet — check back after the engine has been running for a while.</div>
       </div>
     </section>
 
-    <!-- Strategies View -->
-    <section id="view-strategies" class="view-section">
-      <div class="card" style="margin-bottom: var(--space-6);">
-        <div class="card-header">
-          <span class="card-title">Strategy Performance</span>
-        </div>
-        <div id="strategiesList">
-          <div class="empty-state">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
-            <p>Strategies appear as you place bets across different categories</p>
-          </div>
-        </div>
-      </div>
-      <div class="card">
-        <div class="card-header">
-          <span class="card-title">Strategy Guide</span>
-        </div>
-        <div style="font-size: var(--text-sm); color: var(--color-text-muted); line-height: 1.8;">
-          <p style="margin-bottom: var(--space-3);"><strong style="color: var(--color-text);">Phase 1: Exploration</strong> — Place many small bets ($1-5) across different categories and signal types. The engine tracks which strategies produce positive returns.</p>
-          <p style="margin-bottom: var(--space-3);"><strong style="color: var(--color-text);">Phase 2: Identification</strong> — Once a strategy shows consistent edge over 20+ bets with a win rate above 55%, it gets flagged for scaling.</p>
-          <p><strong style="color: var(--color-text);">Phase 3: Scaling</strong> — Increase bet sizes on proven strategies while continuing small exploratory bets to find new edges.</p>
-        </div>
+    <!-- Wallet Leaderboard -->
+    <section class="positions-section">
+      <h2 class="section-title">WALLET LEADERBOARD</h2>
+      <div class="table-wrap">
+        <table class="data-table" id="wallet-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Username</th>
+              <th>Closed</th>
+              <th>Win Rate</th>
+              <th>Realized</th>
+              <th>Unrealized</th>
+              <th>Total P&L</th>
+              <th>Avg Delay</th>
+            </tr>
+          </thead>
+          <tbody id="wallet-body">
+            <tr><td colspan="8" class="empty-row">Not enough data yet — check back after the engine has been running for a while.</td></tr>
+          </tbody>
+        </table>
       </div>
     </section>
 
-    <!-- Settings View -->
-    <section id="view-settings" class="view-section">
-      <div class="grid-2">
-        <div class="card">
-          <div class="card-header">
-            <span class="card-title">Trading Parameters</span>
-          </div>
-          <div style="display: flex; flex-direction: column; gap: var(--space-4);">
-            <div>
-              <label style="font-size: var(--text-xs); color: var(--color-text-muted); display: block; margin-bottom: var(--space-1);">Max Bet Size (USDC)</label>
-              <input class="input" type="number" id="cfg-max_bet_size" value="5" step="0.5" min="0.5">
-            </div>
-            <div>
-              <label style="font-size: var(--text-xs); color: var(--color-text-muted); display: block; margin-bottom: var(--space-1);">Daily Budget (USDC)</label>
-              <input class="input" type="number" id="cfg-daily_budget" value="50" step="5" min="5">
-            </div>
-            <div>
-              <label style="font-size: var(--text-xs); color: var(--color-text-muted); display: block; margin-bottom: var(--space-1);">Minimum Edge Threshold</label>
-              <input class="input" type="number" id="cfg-min_edge" value="0.05" step="0.01" min="0.01" max="0.5">
-            </div>
-            <div>
-              <label style="font-size: var(--text-xs); color: var(--color-text-muted); display: block; margin-bottom: var(--space-1);">Minimum Volume ($)</label>
-              <input class="input" type="number" id="cfg-min_volume" value="1000" step="100">
-            </div>
-            <button class="btn btn-primary" onclick="saveSettings()">Save Settings</button>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="card-header">
-            <span class="card-title">API Configuration</span>
-          </div>
-          <div style="display: flex; flex-direction: column; gap: var(--space-4);">
-            <div style="padding: var(--space-3); background: var(--color-surface-2); border-radius: var(--radius-md); font-size: var(--text-xs); color: var(--color-text-muted);">
-              To enable live trading, you need to provide your Polymarket API credentials. These are derived from your wallet private key using the Polymarket SDK.
-            </div>
-            <div>
-              <label style="font-size: var(--text-xs); color: var(--color-text-muted); display: block; margin-bottom: var(--space-1);">Wallet Address</label>
-              <input class="input" type="text" id="cfg-wallet_address" placeholder="0x...">
-            </div>
-            <div>
-              <label style="font-size: var(--text-xs); color: var(--color-text-muted); display: block; margin-bottom: var(--space-1);">API Key</label>
-              <input class="input" type="password" id="cfg-polymarket_key" placeholder="Your CLOB API key">
-            </div>
-            <div>
-              <label style="font-size: var(--text-xs); color: var(--color-text-muted); display: block; margin-bottom: var(--space-1);">API Secret</label>
-              <input class="input" type="password" id="cfg-polymarket_secret" placeholder="Your CLOB API secret">
-            </div>
-            <div>
-              <label style="font-size: var(--text-xs); color: var(--color-text-muted); display: block; margin-bottom: var(--space-1);">API Passphrase</label>
-              <input class="input" type="password" id="cfg-polymarket_passphrase" placeholder="Your CLOB passphrase">
-            </div>
-            <button class="btn btn-primary" onclick="saveApiConfig()">Save API Config</button>
-          </div>
-        </div>
+    <!-- Insight Boxes -->
+    <section class="insights-row">
+      <div class="insight-box" id="insight-speed">
+        <h3 class="insight-title">Speed vs Profit</h3>
+        <div class="insight-body" id="insight-speed-body">Not enough data yet.</div>
       </div>
-
-      <div class="card" style="margin-top: var(--space-4);">
-        <div class="card-header">
-          <span class="card-title">APIs Required</span>
-        </div>
-        <div style="font-size: var(--text-sm); color: var(--color-text-muted); line-height: 2;">
-          <p><strong style="color: var(--color-primary);">Already integrated (no key needed):</strong></p>
-          <p>Polymarket Gamma API — market discovery, events, tags, sports</p>
-          <p>Polymarket CLOB API (public) — orderbooks, prices, spreads, price history</p>
-          <p>Polymarket Data API — positions, trades, leaderboards</p>
-          <br>
-          <p><strong style="color: var(--color-warning);">Required for live trading:</strong></p>
-          <p>Polymarket CLOB API credentials (derived from wallet private key)</p>
-          <p>USDC.e on Polygon for funding</p>
-          <p>POL for gas fees (if using EOA wallet)</p>
-        </div>
+      <div class="insight-box" id="insight-fees">
+        <h3 class="insight-title">Fee Impact</h3>
+        <div class="insight-body" id="insight-fees-body">Not enough data yet.</div>
       </div>
     </section>
 
   </main>
-</div>
 
-<div class="toast-container" id="toastContainer"></div>
+  <!-- Wallets Tab -->
+  <main id="tab-wallets" class="content tab-content">
 
-<!-- Footer attribution -->
-<footer style="display: none;">
-  <a href="https://www.perplexity.ai/computer" target="_blank" rel="noopener noreferrer">Created with Perplexity Computer</a>
-</footer>
+    <!-- Wallet KPI Summary -->
+    <section class="analysis-kpis" id="wm-kpis">
+      <div class="kpi-card">
+        <div class="kpi-label">Active</div>
+        <div class="kpi-value" id="wm-active">0</div>
+        <div class="kpi-sub" id="wm-total-sub">of 0 total</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">With Trades</div>
+        <div class="kpi-value" id="wm-trading">0</div>
+        <div class="kpi-sub" id="wm-open-sub">0 open positions</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Avg Win Rate</div>
+        <div class="kpi-value" id="wm-avg-wr">0%</div>
+        <div class="kpi-sub">historical</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Total P&L</div>
+        <div class="kpi-value" id="wm-total-pnl">$0</div>
+        <div class="kpi-sub" id="wm-pnl-detail">R: $0 / U: $0</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Avg Score</div>
+        <div class="kpi-value" id="wm-avg-score">—</div>
+        <div class="kpi-sub">wallet score</div>
+      </div>
+    </section>
 
-<script src="./app.js"></script>
+    <!-- Compact Filter Bar -->
+    <section class="wm-filters-bar">
+      <div class="wm-filter-row">
+        <div class="wm-filter-group">
+          <label>Tier</label>
+          <select id="wm-f-tier" onchange="applyWalletFilters()">
+            <option value="">All Tiers</option>
+            <option value="Prime">Prime</option>
+            <option value="Core">Core</option>
+            <option value="Opportunistic">Opportunistic</option>
+            <option value="Watchlist">Watchlist</option>
+            <option value="_none_">(Unscored)</option>
+          </select>
+        </div>
+        <div class="wm-filter-group">
+          <label>Status</label>
+          <select id="wm-f-status" onchange="applyWalletFilters()">
+            <option value="">All</option>
+            <option value="active">Active</option>
+            <option value="inactive">Removed</option>
+          </select>
+        </div>
+        <div class="wm-filter-group wm-search-group">
+          <label>Search</label>
+          <input type="text" id="wm-f-search" placeholder="Name or address..." oninput="applyWalletFilters()">
+        </div>
+        <div class="wm-filter-group">
+          <span class="wm-result-count" id="wm-result-count">0 wallets</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Wallet Table -->
+    <section class="positions-section wm-table-section">
+      <div class="table-wrap">
+        <table class="data-table wm-table" id="wm-table">
+          <thead>
+            <tr>
+              <th class="th-narrow">#</th>
+              <th>Wallet</th>
+              <th class="wm-sortable" data-sort="score" onclick="wmToggleSort('score')">Score <span class="wm-sort-arrow" id="wm-arrow-score"></span></th>
+              <th>Tier</th>
+              <th class="wm-sortable" data-sort="wr" onclick="wmToggleSort('wr')">Win Rate <span class="wm-sort-arrow" id="wm-arrow-wr"></span></th>
+              <th class="wm-sortable" data-sort="csv_pnl" onclick="wmToggleSort('csv_pnl')">CSV P&L <span class="wm-sort-arrow" id="wm-arrow-csv_pnl"></span></th>
+              <th class="wm-sortable" data-sort="volume" onclick="wmToggleSort('volume')">Volume <span class="wm-sort-arrow" id="wm-arrow-volume"></span></th>
+              <th class="wm-sortable" data-sort="markets" onclick="wmToggleSort('markets')">Markets <span class="wm-sort-arrow" id="wm-arrow-markets"></span></th>
+              <th class="wm-sortable" data-sort="open" onclick="wmToggleSort('open')">Open <span class="wm-sort-arrow" id="wm-arrow-open"></span></th>
+              <th class="wm-sortable" data-sort="closed" onclick="wmToggleSort('closed')">Closed <span class="wm-sort-arrow" id="wm-arrow-closed"></span></th>
+              <th class="wm-sortable" data-sort="live_pnl" onclick="wmToggleSort('live_pnl')">Live P&L <span class="wm-sort-arrow" id="wm-arrow-live_pnl"></span></th>
+              <th class="wm-sortable" data-sort="detected" onclick="wmToggleSort('detected')">Detected <span class="wm-sort-arrow" id="wm-arrow-detected"></span></th>
+              <th class="wm-sortable" data-sort="pass_rate" onclick="wmToggleSort('pass_rate')">Pass % <span class="wm-sort-arrow" id="wm-arrow-pass_rate"></span></th>
+              <th class="wm-sortable" data-sort="added" onclick="wmToggleSort('added')">Added <span class="wm-sort-arrow" id="wm-arrow-added"></span></th>
+              <th class="th-action">Action</th>
+            </tr>
+          </thead>
+          <tbody id="wm-body">
+            <tr><td colspan="15" class="empty-row">Loading wallets...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Scout Tab -->
+  <main id="tab-scout" class="content tab-content">
+
+    <!-- Scout Stats Bar -->
+    <section class="analysis-kpis">
+      <div class="kpi-card">
+        <div class="kpi-label">Scout Status</div>
+        <div class="kpi-value" id="scout-status">--</div>
+        <div class="kpi-sub">
+          <button class="btn-scout-ctrl" id="btn-scout-toggle" onclick="toggleScout()">Start</button>
+        </div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Total Scanned</div>
+        <div class="kpi-value" id="scout-scanned">0</div>
+        <div class="kpi-sub" id="scout-cycles">0 cycles</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Queued</div>
+        <div class="kpi-value highlight" id="scout-queued">0</div>
+        <div class="kpi-sub">pending review</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Approved</div>
+        <div class="kpi-value positive" id="scout-approved">0</div>
+        <div class="kpi-sub">added to tracking</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Rejected</div>
+        <div class="kpi-value" id="scout-rejected">0</div>
+        <div class="kpi-sub">passed over</div>
+      </div>
+    </section>
+
+    <!-- Candidate Queue -->
+    <section class="scout-queue-section">
+      <h2 class="section-title">CANDIDATE QUEUE</h2>
+      <div id="scout-queue" class="scout-queue">
+        <div class="feed-empty">Scout is loading candidates...</div>
+      </div>
+    </section>
+
+    <!-- Scout Settings -->
+    <section class="filters-section">
+      <h2 class="section-title">SCOUT SETTINGS</h2>
+      <div id="scout-settings-container" class="filters-grid"></div>
+      <div class="filters-actions">
+        <button id="btn-save-scout-settings" class="btn-save" onclick="saveScoutSettings()">Save Settings</button>
+        <span id="scout-settings-status" class="filters-status"></span>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Filters Tab -->
+  <main id="tab-filters" class="content tab-content">
+    <section class="filters-section">
+      <h2 class="section-title">FILTER SETTINGS</h2>
+      <p class="filters-desc">Configure thresholds for each filter. Trades must pass all enabled filters before being copied.</p>
+      <div id="filters-container" class="filters-grid">
+        <div class="feed-empty">Loading filters...</div>
+      </div>
+      <div class="filters-actions">
+        <button id="btn-save-filters" class="btn-save" onclick="saveFilters()">Save &amp; Apply</button>
+        <span id="filters-status" class="filters-status"></span>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
 </body>
 </html>
