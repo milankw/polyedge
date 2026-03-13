@@ -1093,6 +1093,26 @@ body {
   z-index: 1;
 }
 
+.wm-sortable {
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  transition: background 0.15s;
+}
+.wm-sortable:hover {
+  background: rgba(255,255,255,0.08);
+}
+.wm-sort-arrow {
+  font-size: 0.65rem;
+  margin-left: 3px;
+  opacity: 0.3;
+  transition: opacity 0.15s;
+}
+.wm-sort-arrow.wm-arrow-active {
+  opacity: 1;
+  color: #22d3ee;
+}
+
 .th-narrow {
   width: 36px;
 }

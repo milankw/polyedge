@@ -298,7 +298,7 @@
       </div>
     </section>
 
-    <!-- Filter Bar -->
+    <!-- Compact Filter Bar -->
     <section class="wm-filters-bar">
       <div class="wm-filter-row">
         <div class="wm-filter-group">
@@ -309,8 +309,7 @@
             <option value="Core">Core</option>
             <option value="Opportunistic">Opportunistic</option>
             <option value="Watchlist">Watchlist</option>
-            <option value="Skip">Skip</option>
-            <option value="_none_">(No Tier)</option>
+            <option value="_none_">(Unscored)</option>
           </select>
         </div>
         <div class="wm-filter-group">
@@ -319,37 +318,6 @@
             <option value="">All</option>
             <option value="active">Active</option>
             <option value="inactive">Removed</option>
-          </select>
-        </div>
-        <div class="wm-filter-group">
-          <label>P&L</label>
-          <select id="wm-f-pnl" onchange="applyWalletFilters()">
-            <option value="">Any</option>
-            <option value="profit">Profit</option>
-            <option value="loss">Loss</option>
-            <option value="no-trades">No Trades</option>
-          </select>
-        </div>
-        <div class="wm-filter-group">
-          <label>Win Rate</label>
-          <select id="wm-f-wr" onchange="applyWalletFilters()">
-            <option value="">Any</option>
-            <option value="60+">60%+</option>
-            <option value="50+">50%+</option>
-            <option value="lt50">Below 50%</option>
-          </select>
-        </div>
-        <div class="wm-filter-group">
-          <label>Sort By</label>
-          <select id="wm-f-sort" onchange="applyWalletFilters()">
-            <option value="score-desc">Score (High)</option>
-            <option value="pnl-desc">P&L (High)</option>
-            <option value="pnl-asc">P&L (Low)</option>
-            <option value="wr-desc">Win Rate (High)</option>
-            <option value="trades-desc">Most Trades</option>
-            <option value="volume-desc">Volume (High)</option>
-            <option value="added-desc">Newest</option>
-            <option value="added-asc">Oldest</option>
           </select>
         </div>
         <div class="wm-filter-group wm-search-group">
@@ -370,18 +338,18 @@
             <tr>
               <th class="th-narrow">#</th>
               <th>Wallet</th>
-              <th>Score</th>
+              <th class="wm-sortable" data-sort="score" onclick="wmToggleSort('score')">Score <span class="wm-sort-arrow" id="wm-arrow-score"></span></th>
               <th>Tier</th>
-              <th>Win Rate</th>
-              <th>CSV P&L</th>
-              <th>Volume</th>
-              <th>Markets</th>
-              <th>Open</th>
-              <th>Closed</th>
-              <th>Live P&L</th>
-              <th>Detected</th>
-              <th>Pass Rate</th>
-              <th>Added</th>
+              <th class="wm-sortable" data-sort="wr" onclick="wmToggleSort('wr')">Win Rate <span class="wm-sort-arrow" id="wm-arrow-wr"></span></th>
+              <th class="wm-sortable" data-sort="csv_pnl" onclick="wmToggleSort('csv_pnl')">CSV P&L <span class="wm-sort-arrow" id="wm-arrow-csv_pnl"></span></th>
+              <th class="wm-sortable" data-sort="volume" onclick="wmToggleSort('volume')">Volume <span class="wm-sort-arrow" id="wm-arrow-volume"></span></th>
+              <th class="wm-sortable" data-sort="markets" onclick="wmToggleSort('markets')">Markets <span class="wm-sort-arrow" id="wm-arrow-markets"></span></th>
+              <th class="wm-sortable" data-sort="open" onclick="wmToggleSort('open')">Open <span class="wm-sort-arrow" id="wm-arrow-open"></span></th>
+              <th class="wm-sortable" data-sort="closed" onclick="wmToggleSort('closed')">Closed <span class="wm-sort-arrow" id="wm-arrow-closed"></span></th>
+              <th class="wm-sortable" data-sort="live_pnl" onclick="wmToggleSort('live_pnl')">Live P&L <span class="wm-sort-arrow" id="wm-arrow-live_pnl"></span></th>
+              <th class="wm-sortable" data-sort="detected" onclick="wmToggleSort('detected')">Detected <span class="wm-sort-arrow" id="wm-arrow-detected"></span></th>
+              <th class="wm-sortable" data-sort="pass_rate" onclick="wmToggleSort('pass_rate')">Pass % <span class="wm-sort-arrow" id="wm-arrow-pass_rate"></span></th>
+              <th class="wm-sortable" data-sort="added" onclick="wmToggleSort('added')">Added <span class="wm-sort-arrow" id="wm-arrow-added"></span></th>
               <th class="th-action">Action</th>
             </tr>
           </thead>

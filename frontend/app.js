@@ -648,6 +648,7 @@ async function pollWallets() {
   var data = await apiGet('/wallets/full');
   if (data) {
     wmAllWallets = data;
+    wmUpdateArrows();
     applyWalletFilters();
     renderWalletKpis(data);
   }
@@ -683,35 +684,65 @@ function renderWalletKpis(wallets) {
   setText('wm-avg-score', avgScore > 0 ? avgScore.toFixed(1) : '\u2014');
 }
 
+// -- Column sort state --
+var wmSortCol = 'score';
+var wmSortDir = 'desc';
+
+function wmToggleSort(col) {
+  if (wmSortCol === col) {
+    wmSortDir = wmSortDir === 'desc' ? 'asc' : 'desc';
+  } else {
+    wmSortCol = col;
+    wmSortDir = 'desc';
+  }
+  wmUpdateArrows();
+  applyWalletFilters();
+}
+
+function wmUpdateArrows() {
+  var cols = ['score','wr','csv_pnl','volume','markets','open','closed','live_pnl','detected','pass_rate','added'];
+  for (var i = 0; i < cols.length; i++) {
+    var el = document.getElementById('wm-arrow-' + cols[i]);
+    if (!el) continue;
+    if (cols[i] === wmSortCol) {
+      el.textContent = wmSortDir === 'desc' ? '\u25BC' : '\u25B2';
+      el.classList.add('wm-arrow-active');
+    } else {
+      el.textContent = '';
+      el.classList.remove('wm-arrow-active');
+    }
+  }
+}
+
+function wmGetSortValue(w, col) {
+  switch (col) {
+    case 'score': return w.wallet_score || 0;
+    case 'wr': return w.csv_win_rate || 0;
+    case 'csv_pnl': return w.csv_pnl || 0;
+    case 'volume': return w.csv_volume || 0;
+    case 'markets': return w.csv_markets || 0;
+    case 'open': return w.open_positions || 0;
+    case 'closed': return w.closed_trades || 0;
+    case 'live_pnl': return w.total_pnl || 0;
+    case 'detected': return w.trades_detected || 0;
+    case 'pass_rate': return w.trades_detected > 0 ? (w.trades_passed / w.trades_detected) : 0;
+    case 'added': return w.added_at || '';
+    default: return 0;
+  }
+}
+
 function applyWalletFilters() {
   var tier = (document.getElementById('wm-f-tier') || {}).value || '';
   var status = (document.getElementById('wm-f-status') || {}).value || '';
-  var pnlFilter = (document.getElementById('wm-f-pnl') || {}).value || '';
-  var wrFilter = (document.getElementById('wm-f-wr') || {}).value || '';
-  var sortBy = (document.getElementById('wm-f-sort') || {}).value || 'score-desc';
   var search = ((document.getElementById('wm-f-search') || {}).value || '').toLowerCase().trim();
 
   var filtered = wmAllWallets.filter(function(w) {
     // Tier filter
-    if (tier) {
-      if (tier === '(No Tier)' || tier === '') {
-        // The last option with value "" actually means "no tier"
-        // handled separately since both "All Tiers" and "(No Tier)" have value=""
-      } else if (w.wallet_tier !== tier) {
-        return false;
-      }
-    }
+    if (tier === '_none_' && (w.wallet_tier || '') !== '') return false;
+    if (tier && tier !== '_none_' && w.wallet_tier !== tier) return false;
     // Status filter
     if (status === 'active' && !w.is_active) return false;
     if (status === 'inactive' && w.is_active) return false;
-    // P&L filter
-    if (pnlFilter === 'profit' && w.total_pnl <= 0) return false;
-    if (pnlFilter === 'loss' && w.total_pnl >= 0) return false;
-    if (pnlFilter === 'no-trades' && (w.closed_trades > 0 || w.open_positions > 0)) return false;
-    // Win Rate filter
-    if (wrFilter === '60+' && w.csv_win_rate < 60) return false;
-    if (wrFilter === '50+' && w.csv_win_rate < 50) return false;
-    if (wrFilter === 'lt50' && w.csv_win_rate >= 50) return false;
     // Search filter
     if (search) {
       var name = (w.username || '').toLowerCase();
@@ -721,19 +752,19 @@ function applyWalletFilters() {
     return true;
   });
 
-  // Sort
+  // Sort by clicked column
+  var col = wmSortCol;
+  var dir = wmSortDir;
   filtered.sort(function(a, b) {
-    switch (sortBy) {
-      case 'score-desc': return (b.wallet_score || 0) - (a.wallet_score || 0);
-      case 'pnl-desc': return b.total_pnl - a.total_pnl;
-      case 'pnl-asc': return a.total_pnl - b.total_pnl;
-      case 'wr-desc': return b.csv_win_rate - a.csv_win_rate;
-      case 'trades-desc': return b.trades_detected - a.trades_detected;
-      case 'volume-desc': return (b.csv_volume || 0) - (a.csv_volume || 0);
-      case 'added-desc': return (b.added_at || '').localeCompare(a.added_at || '');
-      case 'added-asc': return (a.added_at || '').localeCompare(b.added_at || '');
-      default: return 0;
+    var va = wmGetSortValue(a, col);
+    var vb = wmGetSortValue(b, col);
+    var cmp = 0;
+    if (typeof va === 'string') {
+      cmp = va.localeCompare(vb);
+    } else {
+      cmp = va - vb;
     }
+    return dir === 'desc' ? -cmp : cmp;
   });
 
   setText('wm-result-count', filtered.length + ' wallet' + (filtered.length !== 1 ? 's' : ''));
