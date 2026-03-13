@@ -3,70 +3,466 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>PolyEdge — Copy-Trade Research</title>
+  <title>PolyEdge — Copy Trading</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/base.css">
-  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/static/base.css">
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 </head>
 <body>
-  <div class="app-layout">
 
-    <!-- Sidebar -->
-    <aside class="sidebar">
-      <div class="sidebar-logo">
-        <h1>POLYEDGE</h1>
-        <div class="badge">Copy Trade Research</div>
-      </div>
-      <nav class="sidebar-nav" id="sidebar-nav">
-        <div class="nav-item active" data-tab="overview">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
-          <span>Overview</span>
-        </div>
-        <div class="nav-item" data-tab="wallets">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12V7H5a2 2 0 0 1 0-4h14v4"/><path d="M3 5v14a2 2 0 0 0 2 2h16v-5"/><path d="M18 12a2 2 0 0 0 0 4h4v-4h-4z"/></svg>
-          <span>Wallets</span>
-        </div>
-        <div class="nav-item" data-tab="trades">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg>
-          <span>Trades</span>
-        </div>
-        <div class="nav-item" data-tab="analytics">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
-          <span>Analytics</span>
-        </div>
-        <div class="nav-item" data-tab="copytrade">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 3h5v5"/><path d="M21 3l-7 7"/><path d="M8 21H3v-5"/><path d="M3 21l7-7"/><circle cx="12" cy="12" r="2"/></svg>
-          <span>Copy Trading</span>
-        </div>
-        <div class="nav-item" data-tab="settings">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
-          <span>Settings / Log</span>
-        </div>
-      </nav>
-      <div class="sidebar-footer" id="sidebar-footer">
-        <span class="status-dot offline" id="status-dot"></span>
-        <span id="last-scan-text">No scans yet</span>
-      </div>
-    </aside>
-
-    <!-- Main -->
-    <main class="main-content" id="main-content">
-      <div class="loading" id="initial-loading">Loading dashboard data...</div>
-    </main>
-
-    <!-- Wallet Detail Overlay -->
-    <div class="overlay" id="wallet-overlay">
-      <div class="overlay-header">
-        <h2 id="overlay-title">Wallet Detail</h2>
-        <button class="overlay-close" id="overlay-close">Close</button>
-      </div>
-      <div class="overlay-body" id="overlay-body"></div>
+  <!-- Top Bar -->
+  <header class="top-bar">
+    <div class="top-bar-left">
+      <span class="logo">POLYEDGE</span>
+      <span class="separator">|</span>
+      <span class="stat">LOOP: <span id="loop-indicator" class="loop-dot"></span> <span id="stat-cycle" class="num">—</span></span>
+      <span class="separator">|</span>
+      <span class="stat">TODAY: <span id="stat-today" class="num">0</span></span>
+      <span class="separator">|</span>
+      <span class="stat">WIN: <span id="stat-win" class="num">0%</span></span>
     </div>
+    <div class="top-bar-right">
+      <button id="btn-loop" class="btn-loop" onclick="toggleLoop()">▶</button>
+    </div>
+  </header>
 
-  </div>
+  <!-- Budget Bar -->
+  <section class="budget-bar">
+    <div class="budget-item">
+      <span class="budget-label">ACCOUNT</span>
+      <span class="budget-value" id="budget-account">$1,000.00</span>
+    </div>
+    <div class="budget-divider"></div>
+    <div class="budget-item">
+      <span class="budget-label">CASH</span>
+      <span class="budget-value" id="budget-cash">$1,000.00</span>
+    </div>
+    <div class="budget-divider"></div>
+    <div class="budget-item">
+      <span class="budget-label">IN POSITIONS</span>
+      <span class="budget-value" id="budget-positions">$0.00</span>
+      <span class="budget-count" id="budget-pos-count">0 open</span>
+    </div>
+    <div class="budget-divider"></div>
+    <div class="budget-item">
+      <span class="budget-label">P&L</span>
+      <span class="budget-value" id="budget-pnl">$0.00</span>
+      <span class="budget-count" id="budget-pnl-detail">R: $0 / U: $0</span>
+    </div>
+    <div class="budget-divider"></div>
+    <div class="budget-item">
+      <span class="budget-label">PER TRADE</span>
+      <span class="budget-value" id="budget-trade-size">$5–$100</span>
+      <span class="budget-count" id="budget-sizing-mode">proportional</span>
+    </div>
+    <div class="budget-progress-wrap">
+      <div class="budget-progress">
+        <div class="budget-progress-positions" id="budget-bar-positions" style="width: 0%"></div>
+        <div class="budget-progress-pnl" id="budget-bar-pnl" style="width: 0%"></div>
+      </div>
+      <div class="budget-progress-labels">
+        <span>$0</span>
+        <span id="budget-bankroll-label">$1,000</span>
+      </div>
+    </div>
+  </section>
 
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
-  <script src="/app.js"></script>
+  <!-- Mode Selector -->
+  <section class="mode-selector" id="mode-selector">
+    <button class="mode-btn active" data-mode="" onclick="selectMode('')">All</button>
+    <button class="mode-btn mode-strict" data-mode="strict" onclick="selectMode('strict')">Strict</button>
+    <button class="mode-btn mode-moderate" data-mode="moderate" onclick="selectMode('moderate')">Moderate</button>
+    <button class="mode-btn mode-aggressive" data-mode="aggressive" onclick="selectMode('aggressive')">Aggressive</button>
+  </section>
+
+  <!-- Mode Comparison Cards -->
+  <section class="mode-comparison" id="mode-comparison">
+    <div class="mode-card mode-card-strict" id="mc-strict">
+      <div class="mode-card-header"><span class="mode-badge badge-strict">STRICT</span></div>
+      <div class="mode-card-stats">
+        <div><span class="mc-label">Trades</span><span class="mc-val" id="mc-strict-trades">0</span></div>
+        <div><span class="mc-label">Win Rate</span><span class="mc-val" id="mc-strict-wr">0%</span></div>
+        <div><span class="mc-label">Realized</span><span class="mc-val" id="mc-strict-rpnl">$0</span></div>
+        <div><span class="mc-label">Unrealized</span><span class="mc-val" id="mc-strict-upnl">$0</span></div>
+        <div><span class="mc-label">Open</span><span class="mc-val" id="mc-strict-open">0</span></div>
+      </div>
+    </div>
+    <div class="mode-card mode-card-moderate" id="mc-moderate">
+      <div class="mode-card-header"><span class="mode-badge badge-moderate">MODERATE</span></div>
+      <div class="mode-card-stats">
+        <div><span class="mc-label">Trades</span><span class="mc-val" id="mc-moderate-trades">0</span></div>
+        <div><span class="mc-label">Win Rate</span><span class="mc-val" id="mc-moderate-wr">0%</span></div>
+        <div><span class="mc-label">Realized</span><span class="mc-val" id="mc-moderate-rpnl">$0</span></div>
+        <div><span class="mc-label">Unrealized</span><span class="mc-val" id="mc-moderate-upnl">$0</span></div>
+        <div><span class="mc-label">Open</span><span class="mc-val" id="mc-moderate-open">0</span></div>
+      </div>
+    </div>
+    <div class="mode-card mode-card-aggressive" id="mc-aggressive">
+      <div class="mode-card-header"><span class="mode-badge badge-aggressive">AGGRESSIVE</span></div>
+      <div class="mode-card-stats">
+        <div><span class="mc-label">Trades</span><span class="mc-val" id="mc-aggressive-trades">0</span></div>
+        <div><span class="mc-label">Win Rate</span><span class="mc-val" id="mc-aggressive-wr">0%</span></div>
+        <div><span class="mc-label">Realized</span><span class="mc-val" id="mc-aggressive-rpnl">$0</span></div>
+        <div><span class="mc-label">Unrealized</span><span class="mc-val" id="mc-aggressive-upnl">$0</span></div>
+        <div><span class="mc-label">Open</span><span class="mc-val" id="mc-aggressive-open">0</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Tab Navigation -->
+  <nav class="tab-nav">
+    <button class="tab-btn active" data-tab="live" onclick="switchTab('live')">Live</button>
+    <button class="tab-btn" data-tab="wallets" onclick="switchTab('wallets')">Wallets</button>
+    <button class="tab-btn" data-tab="analysis" onclick="switchTab('analysis')">Analysis</button>
+    <button class="tab-btn" data-tab="scout" onclick="switchTab('scout')">Scout</button>
+    <button class="tab-btn" data-tab="filters" onclick="switchTab('filters')">Filters</button>
+  </nav>
+
+  <!-- Live Tab -->
+  <main id="tab-live" class="content tab-content active">
+    <section class="feed-section">
+      <h2 class="section-title">LIVE FEED</h2>
+      <div id="feed-container" class="feed-container">
+        <div class="feed-empty">Waiting for trades...</div>
+      </div>
+    </section>
+
+    <!-- Open Positions -->
+    <section class="positions-section">
+      <h2 class="section-title">OPEN POSITIONS</h2>
+      <div class="table-wrap">
+        <table class="data-table" id="open-table">
+          <thead>
+            <tr>
+              <th>Market</th>
+              <th>Dir</th>
+              <th>Entry</th>
+              <th>Current</th>
+              <th>Size</th>
+              <th>Gross</th>
+              <th>Fees</th>
+              <th>Net</th>
+              <th>Delay</th>
+            </tr>
+          </thead>
+          <tbody id="open-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Closed Trades -->
+    <section class="positions-section">
+      <h2 class="section-title">CLOSED TRADES</h2>
+      <div class="table-wrap">
+        <table class="data-table" id="closed-table">
+          <thead>
+            <tr>
+              <th>Market</th>
+              <th>Dir</th>
+              <th>Entry</th>
+              <th>Exit</th>
+              <th>Size</th>
+              <th>Gross</th>
+              <th>Fees</th>
+              <th>Net</th>
+              <th>Delay</th>
+            </tr>
+          </thead>
+          <tbody id="closed-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <!-- Analysis Tab -->
+  <main id="tab-analysis" class="content tab-content">
+
+    <!-- KPI Summary Cards -->
+    <section class="analysis-kpis" id="analysis-kpis">
+      <div class="kpi-card">
+        <div class="kpi-label">Total P&L</div>
+        <div class="kpi-value" id="a-total-pnl">—</div>
+        <div class="kpi-sub" id="a-pnl-detail">realized + unrealized</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Win Rate</div>
+        <div class="kpi-value" id="a-win-rate">—</div>
+        <div class="kpi-sub" id="a-record">0W / 0L</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Profit Factor</div>
+        <div class="kpi-value" id="a-profit-factor">—</div>
+        <div class="kpi-sub">wins / losses</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">ROI</div>
+        <div class="kpi-value" id="a-roi">—</div>
+        <div class="kpi-sub" id="a-invested">$0 invested</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Avg Win / Loss</div>
+        <div class="kpi-value" id="a-avg-wl">—</div>
+        <div class="kpi-sub" id="a-best-worst">best / worst</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Tracking Since</div>
+        <div class="kpi-value" id="a-tracking">—</div>
+        <div class="kpi-sub" id="a-hold-time">avg hold time</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Avg Trade Score</div>
+        <div class="kpi-value" id="a-avg-score">—</div>
+        <div class="kpi-sub">passed trades</div>
+      </div>
+    </section>
+
+    <!-- Daily P&L Chart -->
+    <section class="analysis-chart-section">
+      <h2 class="section-title">DAILY P&L</h2>
+      <div class="chart-wrap" id="daily-chart-wrap">
+        <canvas id="dailyPnlChart"></canvas>
+        <div id="daily-chart-empty" class="chart-empty">Not enough data yet — check back after the engine has been running for a while.</div>
+      </div>
+    </section>
+
+    <!-- Wallet Leaderboard -->
+    <section class="positions-section">
+      <h2 class="section-title">WALLET LEADERBOARD</h2>
+      <div class="table-wrap">
+        <table class="data-table" id="wallet-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Username</th>
+              <th>Closed</th>
+              <th>Win Rate</th>
+              <th>Realized</th>
+              <th>Unrealized</th>
+              <th>Total P&L</th>
+              <th>Avg Delay</th>
+            </tr>
+          </thead>
+          <tbody id="wallet-body">
+            <tr><td colspan="8" class="empty-row">Not enough data yet — check back after the engine has been running for a while.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Insight Boxes -->
+    <section class="insights-row">
+      <div class="insight-box" id="insight-speed">
+        <h3 class="insight-title">Speed vs Profit</h3>
+        <div class="insight-body" id="insight-speed-body">Not enough data yet.</div>
+      </div>
+      <div class="insight-box" id="insight-fees">
+        <h3 class="insight-title">Fee Impact</h3>
+        <div class="insight-body" id="insight-fees-body">Not enough data yet.</div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Wallets Tab -->
+  <main id="tab-wallets" class="content tab-content">
+
+    <!-- Wallet KPI Summary -->
+    <section class="analysis-kpis" id="wm-kpis">
+      <div class="kpi-card">
+        <div class="kpi-label">Active</div>
+        <div class="kpi-value" id="wm-active">0</div>
+        <div class="kpi-sub" id="wm-total-sub">of 0 total</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">With Trades</div>
+        <div class="kpi-value" id="wm-trading">0</div>
+        <div class="kpi-sub" id="wm-open-sub">0 open positions</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Avg Win Rate</div>
+        <div class="kpi-value" id="wm-avg-wr">0%</div>
+        <div class="kpi-sub">historical</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Total P&L</div>
+        <div class="kpi-value" id="wm-total-pnl">$0</div>
+        <div class="kpi-sub" id="wm-pnl-detail">R: $0 / U: $0</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Avg Score</div>
+        <div class="kpi-value" id="wm-avg-score">—</div>
+        <div class="kpi-sub">wallet score</div>
+      </div>
+    </section>
+
+    <!-- Filter Bar -->
+    <section class="wm-filters-bar">
+      <div class="wm-filter-row">
+        <div class="wm-filter-group">
+          <label>Tier</label>
+          <select id="wm-f-tier" onchange="applyWalletFilters()">
+            <option value="">All Tiers</option>
+            <option value="Prime">Prime</option>
+            <option value="Core">Core</option>
+            <option value="Opportunistic">Opportunistic</option>
+            <option value="Watchlist">Watchlist</option>
+            <option value="Skip">Skip</option>
+            <option value="_none_">(No Tier)</option>
+          </select>
+        </div>
+        <div class="wm-filter-group">
+          <label>Status</label>
+          <select id="wm-f-status" onchange="applyWalletFilters()">
+            <option value="">All</option>
+            <option value="active">Active</option>
+            <option value="inactive">Removed</option>
+          </select>
+        </div>
+        <div class="wm-filter-group">
+          <label>P&L</label>
+          <select id="wm-f-pnl" onchange="applyWalletFilters()">
+            <option value="">Any</option>
+            <option value="profit">Profit</option>
+            <option value="loss">Loss</option>
+            <option value="no-trades">No Trades</option>
+          </select>
+        </div>
+        <div class="wm-filter-group">
+          <label>Win Rate</label>
+          <select id="wm-f-wr" onchange="applyWalletFilters()">
+            <option value="">Any</option>
+            <option value="60+">60%+</option>
+            <option value="50+">50%+</option>
+            <option value="lt50">Below 50%</option>
+          </select>
+        </div>
+        <div class="wm-filter-group">
+          <label>Sort By</label>
+          <select id="wm-f-sort" onchange="applyWalletFilters()">
+            <option value="score-desc">Score (High)</option>
+            <option value="pnl-desc">P&L (High)</option>
+            <option value="pnl-asc">P&L (Low)</option>
+            <option value="wr-desc">Win Rate (High)</option>
+            <option value="trades-desc">Most Trades</option>
+            <option value="volume-desc">Volume (High)</option>
+            <option value="added-desc">Newest</option>
+            <option value="added-asc">Oldest</option>
+          </select>
+        </div>
+        <div class="wm-filter-group wm-search-group">
+          <label>Search</label>
+          <input type="text" id="wm-f-search" placeholder="Name or address..." oninput="applyWalletFilters()">
+        </div>
+        <div class="wm-filter-group">
+          <span class="wm-result-count" id="wm-result-count">0 wallets</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Wallet Table -->
+    <section class="positions-section wm-table-section">
+      <div class="table-wrap">
+        <table class="data-table wm-table" id="wm-table">
+          <thead>
+            <tr>
+              <th class="th-narrow">#</th>
+              <th>Wallet</th>
+              <th>Score</th>
+              <th>Tier</th>
+              <th>Win Rate</th>
+              <th>CSV P&L</th>
+              <th>Volume</th>
+              <th>Markets</th>
+              <th>Open</th>
+              <th>Closed</th>
+              <th>Live P&L</th>
+              <th>Detected</th>
+              <th>Pass Rate</th>
+              <th>Added</th>
+              <th class="th-action">Action</th>
+            </tr>
+          </thead>
+          <tbody id="wm-body">
+            <tr><td colspan="15" class="empty-row">Loading wallets...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Scout Tab -->
+  <main id="tab-scout" class="content tab-content">
+
+    <!-- Scout Stats Bar -->
+    <section class="analysis-kpis">
+      <div class="kpi-card">
+        <div class="kpi-label">Scout Status</div>
+        <div class="kpi-value" id="scout-status">--</div>
+        <div class="kpi-sub">
+          <button class="btn-scout-ctrl" id="btn-scout-toggle" onclick="toggleScout()">Start</button>
+        </div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Total Scanned</div>
+        <div class="kpi-value" id="scout-scanned">0</div>
+        <div class="kpi-sub" id="scout-cycles">0 cycles</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Queued</div>
+        <div class="kpi-value highlight" id="scout-queued">0</div>
+        <div class="kpi-sub">pending review</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Approved</div>
+        <div class="kpi-value positive" id="scout-approved">0</div>
+        <div class="kpi-sub">added to tracking</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Rejected</div>
+        <div class="kpi-value" id="scout-rejected">0</div>
+        <div class="kpi-sub">passed over</div>
+      </div>
+    </section>
+
+    <!-- Candidate Queue -->
+    <section class="scout-queue-section">
+      <h2 class="section-title">CANDIDATE QUEUE</h2>
+      <div id="scout-queue" class="scout-queue">
+        <div class="feed-empty">Scout is loading candidates...</div>
+      </div>
+    </section>
+
+    <!-- Scout Settings -->
+    <section class="filters-section">
+      <h2 class="section-title">SCOUT SETTINGS</h2>
+      <div id="scout-settings-container" class="filters-grid"></div>
+      <div class="filters-actions">
+        <button id="btn-save-scout-settings" class="btn-save" onclick="saveScoutSettings()">Save Settings</button>
+        <span id="scout-settings-status" class="filters-status"></span>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Filters Tab -->
+  <main id="tab-filters" class="content tab-content">
+    <section class="filters-section">
+      <h2 class="section-title">FILTER SETTINGS</h2>
+      <p class="filters-desc">Configure thresholds for each filter. Trades must pass all enabled filters before being copied.</p>
+      <div id="filters-container" class="filters-grid">
+        <div class="feed-empty">Loading filters...</div>
+      </div>
+      <div class="filters-actions">
+        <button id="btn-save-filters" class="btn-save" onclick="saveFilters()">Save &amp; Apply</button>
+        <span id="filters-status" class="filters-status"></span>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
 </body>
 </html>

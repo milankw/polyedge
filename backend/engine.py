@@ -1,5 +1,10 @@
 """
-CopyTradeEngine — scans Polymarket wallets, mirrors trades, tracks P&L.
+CopyEngine — continuous parallel polling loop for copy trading.
+
+All 100 wallets polled in parallel via asyncio.gather.
+Persistent httpx.AsyncClient with connection pooling.
+In-memory tx_hash set for O(1) dedup.
+Ms-level delay tracking on every copy.
 """
 import asyncio
 import json
@@ -11,790 +16,1033 @@ from datetime import datetime, timezone
 import aiosqlite
 import httpx
 
-logger = logging.getLogger("polyedge.engine")
+from backend.scorer import score_trade_full
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "data", "polyedge.db")
+logger = logging.getLogger("polyedge.engine")
 
 DATA_API = "https://data-api.polymarket.com"
 GAMMA_API = "https://gamma-api.polymarket.com"
-RATE_LIMIT_DELAY = 0.15  # 150ms between API calls
+CLOB_API = "https://clob.polymarket.com"
+DB_PATH = os.path.join(os.path.dirname(__file__), "data", "polyedge.db")
+
+FILTER_SETTING_KEYS = [
+    "min_liquidity_usd", "entry_timing_minutes", "max_wallet_pool_pct",
+    "min_volume_24h_usd", "min_unique_traders", "resolution_min_days",
+    "resolution_max_days", "min_wallet_win_rate", "min_resolved_markets",
+    "max_price_move_6h_pct", "min_confirming_wallets", "max_bankroll_exposure_pct",
+]
+
+POLY_FEE_RATE = 0.02
+SLIPPAGE_RATE = 0.005
 
 
-class CopyTradeEngine:
+class CopyEngine:
     def __init__(self, db_path: str = DB_PATH):
         self.db_path = db_path
+
+        # In-memory state
+        self._wallet_trades: dict[str, set[str]] = {}  # address -> known tx_hashes
+        self._wallet_positions: dict[tuple, dict] = {}  # (address, mode_id) -> {(cid,idx): pos}
+        self._wallet_addresses: list[str] = []
+        self._wallet_info: dict[str, dict] = {}  # address -> wallet row
+
+        # Loop state
+        self._loop_running: bool = False
+        self._cycle_count: int = 0
+        self._last_cycle_ms: float = 0.0
+        self._worst_cycle_ms: float = 0.0
+        self._trades_today: int = 0
+        self._start_time: float = 0.0
+        self.loop_task: asyncio.Task | None = None
+
+        # Bankroll settings (loaded from DB)
+        self._bankroll_usd: float = 1000.0
+        self._max_bankroll_pct: float = 10.0  # max % of bankroll per single trade
+        self._min_trade_usd: float = 5.0      # floor per trade
+        self._max_trade_usd: float = 100.0     # ceiling per trade
+
+        # Filter settings (loaded from DB)
+        self._filter_settings: dict[str, float] = {}
+
+        # Multi-mode strategy settings
+        self._mode_settings: dict[str, dict] = {}      # mode_id -> {filter_key: value}
+        self._mode_bankrolls: dict[str, float] = {}     # mode_id -> bankroll_usd
+        self._mode_active: dict[str, bool] = {}         # mode_id -> is_active
+
+        # HTTP client — persistent, with connection pooling
         self._client: httpx.AsyncClient | None = None
+        self._db: aiosqlite.Connection | None = None
 
-    async def _get_client(self) -> httpx.AsyncClient:
+    async def _ensure_client(self):
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=30.0)
-        return self._client
-
-    async def close(self):
-        if self._client and not self._client.is_closed:
-            await self._client.aclose()
-
-    async def _db(self) -> aiosqlite.Connection:
-        db = await aiosqlite.connect(self.db_path)
-        db.row_factory = aiosqlite.Row
-        await db.execute("PRAGMA journal_mode=WAL")
-        return db
-
-    # ── API helpers ──────────────────────────────────────────────
-
-    async def _fetch_trades(self, address: str, limit: int = 100) -> list[dict]:
-        client = await self._get_client()
-        try:
-            resp = await client.get(
-                f"{DATA_API}/trades",
-                params={"user": address, "limit": limit, "offset": 0},
+            self._client = httpx.AsyncClient(
+                limits=httpx.Limits(
+                    max_connections=15,
+                    max_keepalive_connections=10,
+                ),
+                timeout=httpx.Timeout(8.0, connect=5.0),
+                http2=False,
             )
-            resp.raise_for_status()
-            return resp.json()
+
+    async def _ensure_db(self):
+        if self._db is None:
+            self._db = await aiosqlite.connect(self.db_path)
+            self._db.row_factory = aiosqlite.Row
+            await self._db.execute("PRAGMA journal_mode=WAL")
+            await self._db.execute("PRAGMA synchronous=NORMAL")
+
+    async def _load_state(self):
+        """Load wallets, known tx_hashes, and open positions into memory."""
+        await self._ensure_db()
+
+        # Load active wallets
+        async with self._db.execute(
+            "SELECT * FROM wallets WHERE is_active = 1"
+        ) as cursor:
+            rows = await cursor.fetchall()
+            self._wallet_addresses = []
+            self._wallet_info = {}
+            for row in rows:
+                addr = row["address"]
+                self._wallet_addresses.append(addr)
+                self._wallet_info[addr] = dict(row)
+        logger.info(f"Loaded {len(self._wallet_addresses)} active wallets")
+
+        # Load known tx_hashes from copy_feed into memory for O(1) dedup
+        async with self._db.execute(
+            "SELECT wallet_address, tx_hash FROM copy_feed"
+        ) as cursor:
+            rows = await cursor.fetchall()
+            for row in rows:
+                addr = row["wallet_address"]
+                if addr not in self._wallet_trades:
+                    self._wallet_trades[addr] = set()
+                self._wallet_trades[addr].add(row["tx_hash"])
+        total_known = sum(len(v) for v in self._wallet_trades.values())
+        logger.info(f"Loaded {total_known} known tx_hashes into memory")
+
+        # Load open shadow positions (mode-aware)
+        self._wallet_positions = {}
+        async with self._db.execute(
+            "SELECT * FROM shadow_positions WHERE status = 'open'"
+        ) as cursor:
+            rows = await cursor.fetchall()
+            for row in rows:
+                addr = row["wallet_address"]
+                mode_id = row["mode_id"] if "mode_id" in row.keys() else "strict"
+                pos_key = (addr, mode_id)
+                key = (row["condition_id"], row["outcome_index"])
+                if pos_key not in self._wallet_positions:
+                    self._wallet_positions[pos_key] = {}
+                self._wallet_positions[pos_key][key] = dict(row)
+        total_pos = sum(len(v) for v in self._wallet_positions.values())
+        logger.info(f"Loaded {total_pos} open shadow positions")
+
+        # Load bankroll settings from DB
+        async with self._db.execute(
+            "SELECT key, value FROM copy_trade_settings WHERE key IN ('bankroll_usd', 'max_bankroll_pct', 'min_trade_usd', 'max_trade_usd')"
+        ) as cursor:
+            rows = await cursor.fetchall()
+            for row in rows:
+                if row["key"] == "bankroll_usd":
+                    self._bankroll_usd = float(row["value"])
+                elif row["key"] == "max_bankroll_pct":
+                    self._max_bankroll_pct = float(row["value"])
+                elif row["key"] == "min_trade_usd":
+                    self._min_trade_usd = float(row["value"])
+                elif row["key"] == "max_trade_usd":
+                    self._max_trade_usd = float(row["value"])
+        logger.info(
+            f"Bankroll: ${self._bankroll_usd:.0f}, proportional sizing "
+            f"(min ${self._min_trade_usd:.0f}, max ${self._max_trade_usd:.0f}, "
+            f"cap {self._max_bankroll_pct}% of bankroll)"
+        )
+
+        # Load filter thresholds
+        await self._load_filter_settings()
+
+        # Load multi-mode settings
+        await self._load_mode_settings()
+
+    # ── Filter Settings ──────────────────────────────────────
+
+    async def _load_filter_settings(self):
+        """Load filter threshold settings from DB."""
+        await self._ensure_db()
+        placeholders = ",".join("?" for _ in FILTER_SETTING_KEYS)
+        async with self._db.execute(
+            f"SELECT key, value FROM copy_trade_settings WHERE key IN ({placeholders})",
+            tuple(FILTER_SETTING_KEYS),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            for row in rows:
+                try:
+                    self._filter_settings[row["key"]] = float(row["value"])
+                except (ValueError, TypeError):
+                    pass
+        logger.info(f"Loaded {len(self._filter_settings)} filter settings")
+
+    async def _load_mode_settings(self):
+        """Load multi-mode strategy settings from DB."""
+        await self._ensure_db()
+        self._mode_settings = {}
+        self._mode_bankrolls = {}
+        self._mode_active = {}
+
+        # Load mode definitions
+        try:
+            async with self._db.execute(
+                "SELECT mode_id, bankroll_usd, is_active FROM strategy_modes"
+            ) as cursor:
+                rows = await cursor.fetchall()
+                for row in rows:
+                    mid = row["mode_id"]
+                    self._mode_bankrolls[mid] = float(row["bankroll_usd"])
+                    self._mode_active[mid] = bool(row["is_active"])
+                    self._mode_settings[mid] = {}
         except Exception as e:
-            logger.error(f"Failed to fetch trades for {address}: {e}")
+            logger.warning(f"Failed to load strategy_modes (table may not exist yet): {e}")
+            # Fallback: single strict mode using global settings
+            self._mode_settings = {"strict": dict(self._filter_settings)}
+            self._mode_bankrolls = {"strict": self._bankroll_usd}
+            self._mode_active = {"strict": True}
+            return
+
+        # Load per-mode filter settings
+        try:
+            async with self._db.execute(
+                "SELECT mode_id, key, value FROM mode_filter_settings"
+            ) as cursor:
+                rows = await cursor.fetchall()
+                for row in rows:
+                    mid = row["mode_id"]
+                    if mid in self._mode_settings:
+                        try:
+                            self._mode_settings[mid][row["key"]] = float(row["value"])
+                        except (ValueError, TypeError):
+                            pass
+        except Exception as e:
+            logger.warning(f"Failed to load mode_filter_settings: {e}")
+
+        logger.info(
+            f"Loaded {len(self._mode_settings)} strategy modes: "
+            + ", ".join(f"{mid}({'on' if self._mode_active.get(mid) else 'off'})" for mid in self._mode_settings)
+        )
+
+    async def reload_settings(self):
+        """Reload all settings from DB (called after settings update)."""
+        await self._load_state()
+        await self._load_filter_settings()
+        await self._load_mode_settings()
+        logger.info("Engine settings reloaded from DB")
+
+    # ── Filter API Helpers ────────────────────────────────────
+
+    async def _fetch_market_data(self, condition_id: str) -> dict | None:
+        """Fetch market data from Gamma API by condition_id."""
+        await self._ensure_client()
+        try:
+            resp = await self._client.get(
+                f"{GAMMA_API}/markets",
+                params={"condition_ids": condition_id, "limit": 1},
+            )
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            if isinstance(data, list) and data:
+                return data[0]
+            return data if isinstance(data, dict) else None
+        except Exception as e:
+            logger.debug(f"_fetch_market_data failed for {condition_id[:12]}...: {e}")
+            return None
+
+    async def _fetch_market_holders(self, condition_id: str) -> list[dict]:
+        """Fetch holder/trader data from Data API."""
+        await self._ensure_client()
+        try:
+            # Try /trades endpoint to count unique traders
+            resp = await self._client.get(
+                f"{DATA_API}/trades",
+                params={"market": condition_id, "limit": 500},
+            )
+            if resp.status_code != 200:
+                return []
+            data = resp.json()
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.debug(f"_fetch_market_holders failed: {e}")
             return []
 
-    async def _fetch_market_by_slug(self, slug: str) -> dict | None:
-        client = await self._get_client()
+    async def _fetch_price_history(self, token_id: str) -> list[dict]:
+        """Fetch 6h price history from CLOB API."""
+        await self._ensure_client()
         try:
-            resp = await client.get(
-                f"{GAMMA_API}/markets",
-                params={"slug": slug, "limit": 1},
+            resp = await self._client.get(
+                f"{CLOB_API}/prices-history",
+                params={"market": token_id, "interval": "6h", "fidelity": 60},
             )
-            resp.raise_for_status()
-            markets = resp.json()
-            if markets and len(markets) > 0:
-                return markets[0]
-            return None
+            if resp.status_code != 200:
+                return []
+            data = resp.json()
+            if isinstance(data, dict) and "history" in data:
+                return data["history"]
+            return data if isinstance(data, list) else []
         except Exception as e:
-            logger.error(f"Failed to fetch market for slug={slug}: {e}")
-            return None
+            logger.debug(f"_fetch_price_history failed: {e}")
+            return []
 
-    # ── Core scan ────────────────────────────────────────────────
-
-    async def scan_all_wallets(self) -> dict:
-        """Scan all active wallets for new trades and mirror them."""
-        start = time.time()
-        db = await self._db()
-        errors = []
-        wallets_scanned = 0
-        total_new_trades = 0
-
+    async def _fetch_wallet_position_in_market(self, wallet_address: str, condition_id: str) -> float:
+        """Fetch wallet's position size in a specific market from Data API."""
+        await self._ensure_client()
         try:
-            rows = await db.execute_fetchall(
-                "SELECT id, address, alloc_usd, csv_volume FROM wallets WHERE is_active = 1"
+            resp = await self._client.get(
+                f"{DATA_API}/positions",
+                params={"user": wallet_address},
             )
-            for row in rows:
-                wallet_id = row["id"]
-                address = row["address"]
-                alloc = row["alloc_usd"] or 1000.0
-                csv_volume = row["csv_volume"] or 1.0
+            if resp.status_code != 200:
+                return 0.0
+            positions = resp.json()
+            if not isinstance(positions, list):
+                return 0.0
+            for pos in positions:
+                if pos.get("conditionId") == condition_id or pos.get("condition_id") == condition_id:
+                    return float(pos.get("size", 0) or pos.get("currentValue", 0) or 0)
+            return 0.0
+        except Exception as e:
+            logger.debug(f"_fetch_wallet_position_in_market failed: {e}")
+            return 0.0
 
-                try:
-                    trades = await self._fetch_trades(address)
-                    await asyncio.sleep(RATE_LIMIT_DELAY)
-                    new_count = 0
+    # ── Filter Evaluation ────────────────────────────────────
 
-                    for t in trades:
-                        tx_hash = t.get("transactionHash")
-                        if not tx_hash:
-                            continue
+    async def _evaluate_filters(self, address: str, trade: dict, market_data: dict | None,
+                                filter_settings: dict | None = None, bankroll: float | None = None) -> list[dict]:
+        """Run all 10 filters. Returns list of filter result dicts."""
+        results = []
+        fs = filter_settings if filter_settings is not None else self._filter_settings
+        bankroll_for_eval = bankroll if bankroll is not None else self._bankroll_usd
+        condition_id = trade.get("conditionId", "")
 
-                        # Check dedup
-                        existing = await db.execute_fetchall(
-                            "SELECT id FROM trades WHERE tx_hash = ?", (tx_hash,)
-                        )
-                        if existing:
-                            continue
+        # F1 — Min Liquidity
+        f1 = {"filter_name": "min_liquidity", "status": "pending", "threshold_value": str(fs.get("min_liquidity_usd", 75000))}
+        if market_data:
+            liquidity = float(market_data.get("liquidityNum", 0) or market_data.get("liquidity", 0) or 0)
+            threshold = fs.get("min_liquidity_usd", 75000)
+            f1["actual_value"] = str(round(liquidity, 2))
+            if liquidity >= threshold:
+                f1["status"] = "passed"
+            else:
+                f1["status"] = "failed"
+                f1["fail_message"] = f"Liquidity ${liquidity:,.0f} below ${threshold:,.0f} minimum"
+        results.append(f1)
 
-                        side = t.get("side", "").upper()
-                        original_size = float(t.get("size", 0))
-                        original_price = float(t.get("price", 0))
-                        outcome_index = int(t.get("outcomeIndex", 0))
-                        condition_id = t.get("conditionId", "")
-                        timestamp_raw = t.get("timestamp")
+        # F2 — Entry Timing Window
+        f2 = {"filter_name": "entry_timing", "status": "pending", "threshold_value": str(fs.get("entry_timing_minutes", 120))}
+        their_ts_ms = self._parse_timestamp_ms(trade)
+        if their_ts_ms:
+            now_ms = int(time.time() * 1000)
+            minutes_since = (now_ms - their_ts_ms) / 60000.0
+            threshold = fs.get("entry_timing_minutes", 120)
+            f2["actual_value"] = str(round(minutes_since, 1))
+            if minutes_since <= threshold:
+                f2["status"] = "passed"
+            else:
+                f2["status"] = "failed"
+                f2["fail_message"] = f"Trade is {minutes_since:.0f}min old, max {threshold:.0f}min"
+        results.append(f2)
 
-                        # Parse timestamp
-                        original_ts = None
-                        if timestamp_raw:
-                            try:
-                                original_ts = int(timestamp_raw)
-                            except (ValueError, TypeError):
-                                try:
-                                    dt = datetime.fromisoformat(str(timestamp_raw).replace("Z", "+00:00"))
-                                    original_ts = int(dt.timestamp())
-                                except Exception:
-                                    original_ts = int(time.time())
-
-                        if side == "BUY":
-                            # Proportional sizing: min(10% of alloc, proportional to wallet volume)
-                            proportional = alloc * (original_size / max(csv_volume, 1))
-                            sim_size = min(alloc * 0.10, proportional)
-                            sim_size = max(sim_size, 0.01)  # floor
-
-                            await db.execute(
-                                """INSERT INTO trades
-                                (wallet_id, wallet_address, tx_hash, original_timestamp,
-                                 condition_id, asset, side, original_size, original_price,
-                                 outcome, outcome_index, market_title, market_slug, event_slug,
-                                 sim_size, sim_entry_price, sim_current_price, sim_pnl, sim_status)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.0, 'open')""",
-                                (
-                                    wallet_id,
-                                    address,
-                                    tx_hash,
-                                    original_ts,
-                                    condition_id,
-                                    t.get("asset", ""),
-                                    "BUY",
-                                    original_size,
-                                    original_price,
-                                    t.get("outcome", ""),
-                                    outcome_index,
-                                    t.get("title", ""),
-                                    t.get("slug", ""),
-                                    t.get("eventSlug", ""),
-                                    sim_size,
-                                    original_price,
-                                    original_price,
-                                ),
-                            )
-                            new_count += 1
-
-                        elif side == "SELL":
-                            # Record the sell trade
-                            await db.execute(
-                                """INSERT INTO trades
-                                (wallet_id, wallet_address, tx_hash, original_timestamp,
-                                 condition_id, asset, side, original_size, original_price,
-                                 outcome, outcome_index, market_title, market_slug, event_slug,
-                                 sim_size, sim_entry_price, sim_current_price, sim_pnl, sim_status)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 0.0, 'sold')""",
-                                (
-                                    wallet_id,
-                                    address,
-                                    tx_hash,
-                                    original_ts,
-                                    condition_id,
-                                    t.get("asset", ""),
-                                    "SELL",
-                                    original_size,
-                                    original_price,
-                                    t.get("outcome", ""),
-                                    outcome_index,
-                                    t.get("title", ""),
-                                    t.get("slug", ""),
-                                    t.get("eventSlug", ""),
-                                    original_price,
-                                    original_price,
-                                ),
-                            )
-                            new_count += 1
-
-                            # Close matching open BUY position
-                            open_pos = await db.execute_fetchall(
-                                """SELECT id, sim_size, sim_entry_price FROM trades
-                                WHERE wallet_id = ? AND condition_id = ? AND outcome_index = ?
-                                AND sim_status = 'open' AND side = 'BUY'
-                                ORDER BY detected_at ASC LIMIT 1""",
-                                (wallet_id, condition_id, outcome_index),
-                            )
-                            if open_pos:
-                                pos = open_pos[0]
-                                shares = pos["sim_size"] / pos["sim_entry_price"] if pos["sim_entry_price"] > 0 else 0
-                                realized_pnl = (original_price - pos["sim_entry_price"]) * shares
-                                await db.execute(
-                                    """UPDATE trades SET sim_status = 'sold',
-                                    sim_exit_price = ?, sim_exit_time = datetime('now'),
-                                    sim_pnl = ?, sim_current_price = ?,
-                                    updated_at = datetime('now')
-                                    WHERE id = ?""",
-                                    (original_price, realized_pnl, original_price, pos["id"]),
-                                )
-
-                    total_new_trades += new_count
-                    wallets_scanned += 1
-
-                    # Update wallet last_scanned
-                    await db.execute(
-                        "UPDATE wallets SET last_scanned = datetime('now') WHERE id = ?",
-                        (wallet_id,),
-                    )
-
-                except Exception as e:
-                    errors.append(f"{address[:10]}: {str(e)[:100]}")
-                    logger.error(f"Error scanning wallet {address}: {e}")
-
-            await db.commit()
-
-            # Update wallet stats
-            await self._update_wallet_stats(db)
-            await db.commit()
-
-        finally:
-            await db.close()
-
-        duration = time.time() - start
-
-        # Log the scan
-        await self._log_scan("trades", wallets_scanned, total_new_trades, 0, 0, duration, errors)
-
-        return {
-            "wallets_scanned": wallets_scanned,
-            "new_trades": total_new_trades,
-            "duration_seconds": round(duration, 2),
-            "errors": errors,
-        }
-
-    # ── Price update + resolution ─────────────────────────────────
-
-    async def update_prices(self) -> dict:
-        """Update prices for all open positions, resolve completed markets."""
-        start = time.time()
-        db = await self._db()
-        errors = []
-        prices_updated = 0
-        positions_resolved = 0
-
-        try:
-            # Get all open trades grouped by slug
-            open_trades = await db.execute_fetchall(
-                """SELECT id, market_slug, outcome_index, sim_size, sim_entry_price
-                FROM trades WHERE sim_status = 'open' AND side = 'BUY'"""
-            )
-
-            # Group by slug
-            slug_map: dict[str, list] = {}
-            for t in open_trades:
-                slug = t["market_slug"]
-                if slug:
-                    slug_map.setdefault(slug, []).append(t)
-
-            # Fetch price for each unique slug
-            for slug, trade_list in slug_map.items():
-                try:
-                    market = await self._fetch_market_by_slug(slug)
-                    await asyncio.sleep(RATE_LIMIT_DELAY)
-
-                    if not market:
-                        continue
-
-                    outcome_prices_raw = market.get("outcomePrices", "")
-                    if isinstance(outcome_prices_raw, str):
-                        try:
-                            outcome_prices = json.loads(outcome_prices_raw)
-                        except json.JSONDecodeError:
-                            continue
+        # F3 — Wallet Concentration
+        f3 = {"filter_name": "wallet_concentration", "status": "pending", "threshold_value": str(fs.get("max_wallet_pool_pct", 10.0))}
+        if market_data and condition_id:
+            try:
+                position_value = await self._fetch_wallet_position_in_market(address, condition_id)
+                liquidity = float(market_data.get("liquidityNum", 0) or market_data.get("liquidity", 0) or 0)
+                if liquidity > 0:
+                    concentration_pct = (position_value / liquidity) * 100
+                    threshold = fs.get("max_wallet_pool_pct", 10.0)
+                    f3["actual_value"] = str(round(concentration_pct, 2))
+                    if concentration_pct <= threshold:
+                        f3["status"] = "passed"
                     else:
-                        outcome_prices = outcome_prices_raw
+                        f3["status"] = "failed"
+                        f3["fail_message"] = f"Wallet controls {concentration_pct:.1f}% of pool, max {threshold:.1f}%"
+                else:
+                    f3["actual_value"] = "0"
+                    f3["status"] = "passed"
+            except Exception:
+                pass
+        results.append(f3)
 
-                    if not outcome_prices or len(outcome_prices) < 2:
-                        continue
+        # F4 — Min 24H Volume
+        f4 = {"filter_name": "min_volume_24h", "status": "pending", "threshold_value": str(fs.get("min_volume_24h_usd", 25000))}
+        if market_data:
+            volume = float(market_data.get("volume24hr", 0) or market_data.get("volume24hrClob", 0) or 0)
+            threshold = fs.get("min_volume_24h_usd", 25000)
+            f4["actual_value"] = str(round(volume, 2))
+            if volume >= threshold:
+                f4["status"] = "passed"
+            else:
+                f4["status"] = "failed"
+                f4["fail_message"] = f"24h volume ${volume:,.0f} below ${threshold:,.0f} minimum"
+        results.append(f4)
 
-                    is_closed = market.get("closed", False)
+        # F5 — Min Unique Traders
+        f5 = {"filter_name": "min_unique_traders", "status": "pending", "threshold_value": str(fs.get("min_unique_traders", 50))}
+        if condition_id:
+            try:
+                trades_data = await self._fetch_market_holders(condition_id)
+                if trades_data:
+                    unique_addrs = set()
+                    for t in trades_data:
+                        user = t.get("proxyWallet") or t.get("user") or t.get("taker") or t.get("maker")
+                        if user:
+                            unique_addrs.add(user.lower())
+                    trader_count = len(unique_addrs)
+                    threshold = fs.get("min_unique_traders", 50)
+                    f5["actual_value"] = str(trader_count)
+                    if trader_count >= threshold:
+                        f5["status"] = "passed"
+                    else:
+                        f5["status"] = "failed"
+                        f5["fail_message"] = f"Only {trader_count} unique traders, need {threshold:.0f}"
+            except Exception:
+                pass
+        results.append(f5)
 
-                    for t in trade_list:
-                        idx = t["outcome_index"]
-                        if idx >= len(outcome_prices):
-                            continue
+        # F6 — Resolution Date Window [DISABLED]
+        f6 = {"filter_name": "resolution_window", "status": "passed",
+              "threshold_value": "disabled", "actual_value": "disabled", "fail_message": None}
+        results.append(f6)
 
-                        current_price = float(outcome_prices[idx])
-                        entry_price = t["sim_entry_price"] or 0
-                        sim_size = t["sim_size"] or 0
-                        shares = sim_size / entry_price if entry_price > 0 else 0
+        # F7 — Wallet Win Rate & Track Record (local data only)
+        f7 = {"filter_name": "wallet_win_rate", "status": "pending",
+              "threshold_value": f"{fs.get('min_wallet_win_rate', 55.0)}%/{fs.get('min_resolved_markets', 20)}m"}
+        wallet_info = self._wallet_info.get(address, {})
+        csv_win_rate = float(wallet_info.get("csv_win_rate", 0) or 0)
+        csv_unique_markets = int(wallet_info.get("csv_unique_markets", 0) or 0)
+        min_wr = fs.get("min_wallet_win_rate", 55.0)
+        min_markets = fs.get("min_resolved_markets", 20)
+        f7["actual_value"] = f"{csv_win_rate:.1f}%/{csv_unique_markets}m"
+        if csv_win_rate >= min_wr and csv_unique_markets >= min_markets:
+            f7["status"] = "passed"
+        else:
+            f7["status"] = "failed"
+            parts = []
+            if csv_win_rate < min_wr:
+                parts.append(f"Win rate {csv_win_rate:.1f}% < {min_wr:.1f}%")
+            if csv_unique_markets < min_markets:
+                parts.append(f"Markets {csv_unique_markets} < {min_markets:.0f}")
+            f7["fail_message"] = "; ".join(parts)
+        results.append(f7)
 
-                        if is_closed:
-                            # Market resolved
-                            if current_price >= 0.95:
-                                # This outcome won
-                                pnl = (1.0 * shares) - sim_size
-                                await db.execute(
-                                    """UPDATE trades SET sim_status = 'won',
-                                    sim_current_price = ?, sim_exit_price = 1.0,
-                                    sim_pnl = ?, sim_exit_time = datetime('now'),
-                                    updated_at = datetime('now')
-                                    WHERE id = ?""",
-                                    (current_price, pnl, t["id"]),
-                                )
-                                positions_resolved += 1
-                            elif current_price <= 0.05:
-                                # This outcome lost
-                                pnl = -sim_size
-                                await db.execute(
-                                    """UPDATE trades SET sim_status = 'lost',
-                                    sim_current_price = ?, sim_exit_price = 0.0,
-                                    sim_pnl = ?, sim_exit_time = datetime('now'),
-                                    updated_at = datetime('now')
-                                    WHERE id = ?""",
-                                    (current_price, pnl, t["id"]),
-                                )
-                                positions_resolved += 1
-                            else:
-                                # Closed but ambiguous price — mark as price
-                                unrealized = (current_price - entry_price) * shares
-                                await db.execute(
-                                    """UPDATE trades SET sim_current_price = ?,
-                                    sim_pnl = ?, updated_at = datetime('now')
-                                    WHERE id = ?""",
-                                    (current_price, unrealized, t["id"]),
-                                )
-                        else:
-                            # Still open — update unrealized P&L
-                            unrealized = (current_price - entry_price) * shares
-                            await db.execute(
-                                """UPDATE trades SET sim_current_price = ?,
-                                sim_pnl = ?, updated_at = datetime('now')
-                                WHERE id = ?""",
-                                (current_price, unrealized, t["id"]),
-                            )
-                        prices_updated += 1
+        # F8 — Recent Price Movement Cap [DISABLED]
+        f8 = {"filter_name": "price_movement_6h", "status": "passed",
+              "threshold_value": "disabled", "actual_value": "disabled", "fail_message": None}
+        results.append(f8)
 
+        # F9 — Multi-Wallet Confirmation [DISABLED]
+        f9 = {"filter_name": "multi_wallet_confirm", "status": "passed",
+              "threshold_value": "disabled", "actual_value": "disabled", "fail_message": None}
+        results.append(f9)
+
+        # F10 — Max Bankroll Exposure (local check)
+        f10 = {"filter_name": "bankroll_exposure", "status": "pending",
+               "threshold_value": str(fs.get("max_bankroll_exposure_pct", 5.0))}
+        their_size = float(trade.get("size", 0) or 0)
+        their_volume = float(self._wallet_info.get(address, {}).get("csv_volume", 0) or 0)
+        bankroll = bankroll_for_eval
+        if their_volume > 0 and their_size > 0:
+            proposed = bankroll * (their_size / their_volume)
+        else:
+            proposed = bankroll * 0.01
+        max_allowed_sizing = bankroll * (self._max_bankroll_pct / 100.0)
+        proposed = max(self._min_trade_usd, min(proposed, self._max_trade_usd, max_allowed_sizing))
+        exposure_pct = (proposed / bankroll) * 100 if bankroll > 0 else 0
+        threshold = fs.get("max_bankroll_exposure_pct", 5.0)
+        f10["actual_value"] = str(round(exposure_pct, 2))
+        if exposure_pct <= threshold:
+            f10["status"] = "passed"
+        else:
+            f10["status"] = "failed"
+            f10["fail_message"] = f"Exposure {exposure_pct:.1f}% exceeds {threshold:.1f}% cap"
+        results.append(f10)
+
+        return results
+
+    async def _store_filter_results(self, tx_hash: str, copy_feed_id: int | None, results: list[dict],
+                                     mode_id: str = "strict"):
+        """Store filter results in DB and update copy_feed verdict."""
+        await self._ensure_db()
+
+        for r in results:
+            try:
+                await self._db.execute(
+                    """INSERT OR REPLACE INTO filter_results
+                    (copy_feed_id, tx_hash, filter_name, status, threshold_value, actual_value, fail_message, mode_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (copy_feed_id, tx_hash, r["filter_name"], r["status"],
+                     r.get("threshold_value"), r.get("actual_value"), r.get("fail_message"), mode_id),
+                )
+            except Exception as e:
+                logger.error(f"Failed to store filter result: {e}")
+
+        # Compute aggregate verdict
+        statuses = [r["status"] for r in results]
+        if any(s == "failed" for s in statuses):
+            verdict = "failed"
+        elif any(s == "pending" for s in statuses):
+            verdict = "pending"
+        else:
+            verdict = "passed"
+
+        if copy_feed_id:
+            try:
+                await self._db.execute(
+                    "UPDATE copy_feed SET filter_verdict = ? WHERE id = ?",
+                    (verdict, copy_feed_id),
+                )
+            except Exception as e:
+                logger.error(f"Failed to update filter_verdict: {e}")
+
+        await self._db.commit()
+        return verdict
+
+    # ── Priming ───────────────────────────────────────────────
+
+    async def _prime_known_trades(self):
+        """Fetch current trades for all wallets and mark as known.
+        This prevents old/historical trades from being treated as new.
+        Only trades that appear AFTER this priming pass will be copied."""
+        logger.info("PRIMING: fetching existing trades to build dedup set...")
+        BATCH_SIZE = 10
+        BATCH_DELAY = 0.5
+        total_primed = 0
+
+        for i in range(0, len(self._wallet_addresses), BATCH_SIZE):
+            batch = self._wallet_addresses[i : i + BATCH_SIZE]
+            tasks = [self._fetch_recent_trades(addr, limit=20) for addr in batch]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            for j, result in enumerate(results):
+                addr = batch[j]
+                if isinstance(result, list):
+                    if addr not in self._wallet_trades:
+                        self._wallet_trades[addr] = set()
+                    for trade in result:
+                        tx_hash = trade.get("transactionHash")
+                        if tx_hash:
+                            self._wallet_trades[addr].add(tx_hash)
+                            total_primed += 1
+
+            if i + BATCH_SIZE < len(self._wallet_addresses):
+                await asyncio.sleep(BATCH_DELAY)
+
+        logger.info(f"PRIMING DONE: {total_primed} existing trades marked as known")
+
+    # ── Main Loop ─────────────────────────────────────────────
+
+    async def start_loop(self):
+        """Start the continuous polling loop. Runs forever."""
+        logger.info("Starting copy engine loop...")
+        await self._ensure_client()
+        await self._ensure_db()
+        await self._load_state()
+
+        # If copy_feed is empty (fresh start), prime the dedup set
+        # so historical trades are ignored
+        async with self._db.execute("SELECT COUNT(*) FROM copy_feed") as cursor:
+            row = await cursor.fetchone()
+            feed_count = row[0] if row else 0
+        if feed_count == 0 and not any(self._wallet_trades.values()):
+            await self._prime_known_trades()
+
+        self._loop_running = True
+        self._start_time = time.monotonic()
+        self._cycle_count = 0
+        self._worst_cycle_ms = 0.0
+
+        while self._loop_running:
+            try:
+                cycle_start = time.monotonic()
+                new_trades, failed = await self._run_cycle()
+                cycle_ms = (time.monotonic() - cycle_start) * 1000
+                self._last_cycle_ms = cycle_ms
+                self._worst_cycle_ms = max(self._worst_cycle_ms, cycle_ms)
+                self._cycle_count += 1
+
+                if cycle_ms > 3000:
+                    logger.warning(f"SLOW CYCLE #{self._cycle_count}: {cycle_ms:.0f}ms")
+
+                # Log cycle health every 100 cycles
+                if self._cycle_count % 100 == 0:
+                    try:
+                        await self._db.execute(
+                            """INSERT INTO loop_log
+                            (cycle_number, cycle_ms, wallets_polled, wallets_failed,
+                             new_trades_detected, copies_executed)
+                            VALUES (?, ?, ?, ?, ?, ?)""",
+                            (
+                                self._cycle_count,
+                                cycle_ms,
+                                len(self._wallet_addresses),
+                                failed,
+                                new_trades,
+                                new_trades,
+                            ),
+                        )
+                        await self._db.commit()
+                    except Exception as e:
+                        logger.error(f"Failed to log cycle: {e}")
+
+            except Exception as e:
+                logger.exception(f"Cycle error (continuing): {e}")
+
+            # Pause between cycles — 2s keeps us well under rate limits
+            await asyncio.sleep(2.0)
+
+    def stop_loop(self):
+        self._loop_running = False
+        if self.loop_task and not self.loop_task.done():
+            self.loop_task.cancel()
+
+    async def close(self):
+        self._loop_running = False
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
+        if self._db:
+            await self._db.close()
+            self._db = None
+
+    # ── Cycle ─────────────────────────────────────────────────
+
+    async def _run_cycle(self) -> tuple[int, int]:
+        """Fetch wallets in batches to avoid 429 rate limits."""
+        BATCH_SIZE = 10
+        BATCH_DELAY = 0.5  # 500ms between batches
+        new_trades = 0
+        failed = 0
+
+        for i in range(0, len(self._wallet_addresses), BATCH_SIZE):
+            batch = self._wallet_addresses[i : i + BATCH_SIZE]
+            tasks = [self._poll_wallet(addr) for addr in batch]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            for j, result in enumerate(results):
+                if isinstance(result, Exception):
+                    logger.error(f"Wallet {batch[j][:10]}...: {result}")
+                    failed += 1
+                elif isinstance(result, int):
+                    new_trades += result
+
+            # Brief pause between batches to stay under rate limits
+            if i + BATCH_SIZE < len(self._wallet_addresses):
+                await asyncio.sleep(BATCH_DELAY)
+
+        return new_trades, failed
+
+    async def _poll_wallet(self, address: str) -> int:
+        """Fetch latest trades for one wallet, diff against known state, run filters for each mode."""
+        trades = await self._fetch_recent_trades(address, limit=20)
+        known = self._wallet_trades.get(address, set())
+        new_count = 0
+
+        for trade in trades:
+            tx_hash = trade.get("transactionHash")
+            if not tx_hash or tx_hash in known:
+                continue
+
+            detection_time_ms = int(time.time() * 1000)
+            their_timestamp_ms = self._parse_timestamp_ms(trade)
+            delay_ms = (
+                detection_time_ms - their_timestamp_ms
+                if their_timestamp_ms
+                else None
+            )
+
+            # Fetch market data ONCE (shared across all modes)
+            condition_id = trade.get("conditionId", "")
+            market_data = None
+            if condition_id:
+                market_data = await self._fetch_market_data(condition_id)
+
+            # Evaluate and execute for EACH active mode
+            for mode_id, mode_settings in self._mode_settings.items():
+                if not self._mode_active.get(mode_id, False):
+                    continue
+
+                mode_bankroll = self._mode_bankrolls.get(mode_id, self._bankroll_usd)
+
+                # Run filters with this mode's settings
+                mode_filter_results = await self._evaluate_filters(
+                    address, trade, market_data, mode_settings, mode_bankroll
+                )
+
+                # Execute copy with mode_id
+                copy_feed_id = await self._execute_copy(
+                    address, trade, delay_ms, mode_filter_results, mode_id=mode_id
+                )
+
+                # Store filter results with mode_id
+                if copy_feed_id:
+                    verdict = await self._store_filter_results(
+                        tx_hash, copy_feed_id, mode_filter_results, mode_id=mode_id
+                    )
+                    logger.info(f"Filters [{mode_id}]: {verdict} for {tx_hash[:12]}...")
+
+            known.add(tx_hash)
+            new_count += 1
+
+        self._wallet_trades[address] = known
+        return new_count
+
+    # ── API Fetching ──────────────────────────────────────────
+
+    async def _fetch_recent_trades(self, address: str, limit: int = 20) -> list[dict]:
+        await self._ensure_client()
+        max_retries = 2
+        for attempt in range(max_retries + 1):
+            try:
+                resp = await self._client.get(
+                    f"{DATA_API}/trades",
+                    params={"user": address, "limit": limit},
+                )
+                if resp.status_code == 429:
+                    # Rate limited — back off and retry
+                    backoff = 1.0 * (2 ** attempt)
+                    logger.warning(f"429 for {address[:10]}... backing off {backoff}s")
+                    await asyncio.sleep(backoff)
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                return data if isinstance(data, list) else []
+            except httpx.TimeoutException:
+                return []
+            except Exception as e:
+                if attempt < max_retries:
+                    await asyncio.sleep(0.5)
+                    continue
+                logger.debug(f"Fetch failed for {address[:10]}...: {e}")
+                return []
+        return []
+
+    def _parse_timestamp_ms(self, trade: dict) -> int | None:
+        ts = trade.get("timestamp")
+        if ts is None:
+            return None
+        if isinstance(ts, (int, float)):
+            return int(ts * 1000) if ts < 1e12 else int(ts)
+        if isinstance(ts, str):
+            try:
+                if ts.isdigit():
+                    val = int(ts)
+                    return val * 1000 if val < 1e12 else val
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                return int(dt.timestamp() * 1000)
+            except (ValueError, OSError):
+                pass
+        return None
+
+    # ── Copy Execution ────────────────────────────────────────
+
+    def _has_open_position(self, wallet_id: int, condition_id: str, outcome_index: int,
+                            mode_id: str = "strict") -> bool:
+        for addr, info in self._wallet_info.items():
+            if info["id"] == wallet_id:
+                positions = self._wallet_positions.get((addr, mode_id), {})
+                return (condition_id, outcome_index) in positions
+        return False
+
+    async def _execute_copy(self, their_address: str, trade: dict, delay_ms: int | None,
+                            filter_results: list[dict] | None = None,
+                            mode_id: str = "strict") -> int | None:
+        """Mirror a detected trade. Returns copy_feed_id or None."""
+        side = trade.get("side", "").upper()
+        tx_hash = trade["transactionHash"]
+        condition_id = trade.get("conditionId", "")
+        outcome_index = int(trade.get("outcomeIndex", 0))
+        their_price = float(trade.get("price", 0) or 0)
+        their_size = float(trade.get("size", 0) or 0)
+        market_slug = trade.get("slug", "")
+        market_title = trade.get("title", "")
+        direction = "YES" if outcome_index == 0 else "NO"
+
+        wallet_info = self._wallet_info.get(their_address, {})
+        wallet_id = wallet_info.get("id", 0)
+        wallet_username = wallet_info.get("username", "")
+
+        # Compute filter verdict
+        filter_verdict = "skipped"
+        if filter_results:
+            statuses = [r["status"] for r in filter_results]
+            if any(s == "failed" for s in statuses):
+                filter_verdict = "failed"
+            elif any(s == "pending" for s in statuses):
+                filter_verdict = "pending"
+            else:
+                filter_verdict = "passed"
+
+        # Extract metrics from filter results for scoring
+        score_data = None
+        if filter_results and filter_verdict == "passed":
+            metrics = {}
+            for fr in filter_results:
+                name = fr.get("filter_name", "")
+                val = fr.get("actual_value")
+                if val and val != "disabled":
+                    try:
+                        if name == "min_liquidity":
+                            metrics["liquidity_usd"] = float(val)
+                        elif name == "entry_timing":
+                            metrics["minutes_since_open"] = float(val)
+                        elif name == "wallet_concentration":
+                            metrics["wallet_share_pct"] = float(val)
+                        elif name == "min_volume_24h":
+                            metrics["volume_24h_usd"] = float(val)
+                        elif name == "min_unique_traders":
+                            metrics["unique_traders"] = int(float(val))
+                        elif name == "wallet_win_rate":
+                            parts = val.split("/")
+                            metrics["win_rate_pct"] = float(parts[0].replace("%", ""))
+                            metrics["resolved_markets"] = int(parts[1].replace("m", ""))
+                        elif name == "bankroll_exposure":
+                            metrics["exposure_pct"] = float(val)
+                    except (ValueError, IndexError):
+                        pass
+
+            # Compute scores if we have enough data
+            if len(metrics) >= 5:
+                score_data = score_trade_full(
+                    liquidity_usd=metrics.get("liquidity_usd", 0),
+                    minutes_since_open=metrics.get("minutes_since_open", 0),
+                    wallet_share_pct=metrics.get("wallet_share_pct", 0),
+                    volume_24h_usd=metrics.get("volume_24h_usd", 0),
+                    unique_traders=metrics.get("unique_traders", 0),
+                    win_rate_pct=metrics.get("win_rate_pct", 0),
+                    resolved_markets=metrics.get("resolved_markets", 0),
+                    exposure_pct=metrics.get("exposure_pct", 0),
+                )
+
+        # Proportional sizing: mirror their trade size relative to their portfolio
+        bankroll = self._mode_bankrolls.get(mode_id, self._bankroll_usd)
+        their_volume = float(wallet_info.get("csv_volume", 0) or 0)
+
+        if their_volume > 0 and their_size > 0:
+            their_pct = their_size / their_volume
+            our_size = bankroll * their_pct
+        else:
+            our_size = bankroll * 0.01
+
+        # Clamp to min/max bounds
+        max_allowed = bankroll * (self._max_bankroll_pct / 100.0)
+        # Also apply bankroll exposure hard cap (Filter 10)
+        mode_fs = self._mode_settings.get(mode_id, self._filter_settings)
+        max_exposure = bankroll * (mode_fs.get("max_bankroll_exposure_pct", 5.0) / 100.0)
+        our_size = max(self._min_trade_usd, min(our_size, self._max_trade_usd, max_allowed, max_exposure))
+        our_size = round(our_size, 2)
+
+        our_price = their_price
+        slippage_cost = our_size * SLIPPAGE_RATE
+        poly_fee = our_size * POLY_FEE_RATE
+        our_shares = our_size / our_price if our_price > 0 else 0
+        execution_time_ms = int(time.time() * 1000)
+
+        realized_pnl = None
+        net_pnl = None
+        pos_key = (condition_id, outcome_index)
+
+        # Only execute shadow position changes if filters passed
+        filters_ok = (filter_verdict == "passed")
+
+        if side == "BUY":
+            has_pos = self._has_open_position(wallet_id, condition_id, outcome_index, mode_id)
+            event_type = "ADD" if has_pos else "OPEN"
+
+            if not has_pos and filters_ok:
+                try:
+                    await self._db.execute(
+                        """INSERT OR REPLACE INTO shadow_positions
+                        (wallet_id, wallet_address, wallet_username, condition_id,
+                         outcome_index, market_slug, market_title, direction,
+                         their_entry_price, their_current_size, our_entry_price,
+                         our_size_usdc, our_shares, current_price, poly_fee,
+                         slippage, entry_delay_ms, status, score_trade, trade_tier, mode_id)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)""",
+                        (
+                            wallet_id, their_address, wallet_username, condition_id,
+                            outcome_index, market_slug, market_title, direction,
+                            their_price, their_size, our_price,
+                            our_size, our_shares, our_price, poly_fee,
+                            slippage_cost, delay_ms,
+                            score_data["score_trade"] if score_data else None,
+                            score_data["trade_tier"] if score_data else None,
+                            mode_id,
+                        ),
+                    )
+                    await self._db.commit()
                 except Exception as e:
-                    errors.append(f"slug={slug}: {str(e)[:100]}")
-                    logger.error(f"Error updating prices for slug={slug}: {e}")
+                    logger.error(f"Failed to insert shadow position: {e}")
 
-            await db.commit()
+                addr_positions = self._wallet_positions.setdefault((their_address, mode_id), {})
+                addr_positions[pos_key] = {
+                    "wallet_id": wallet_id,
+                    "condition_id": condition_id,
+                    "outcome_index": outcome_index,
+                    "our_entry_price": our_price,
+                    "our_size_usdc": our_size,
+                    "our_shares": our_shares,
+                }
+            elif has_pos and filters_ok:
+                try:
+                    await self._db.execute(
+                        """UPDATE shadow_positions
+                        SET our_size_usdc = our_size_usdc + ?,
+                            our_shares = our_shares + ?,
+                            their_current_size = their_current_size + ?,
+                            poly_fee = poly_fee + ?,
+                            slippage = slippage + ?
+                        WHERE wallet_id = ? AND condition_id = ? AND outcome_index = ?
+                              AND status = 'open' AND mode_id = ?""",
+                        (our_size, our_shares, their_size, poly_fee, slippage_cost,
+                         wallet_id, condition_id, outcome_index, mode_id),
+                    )
+                    await self._db.commit()
+                except Exception as e:
+                    logger.error(f"Failed to update shadow position: {e}")
 
-            # Update wallet stats
-            await self._update_wallet_stats(db)
-            await db.commit()
+            if not filters_ok:
+                event_type = f"FILTERED_{event_type}"
 
-        finally:
-            await db.close()
+        elif side == "SELL":
+            event_type = "CLOSE"
+            pos_data = self._wallet_positions.get((their_address, mode_id), {}).get(pos_key)
+            if pos_data:
+                entry_price = pos_data.get("our_entry_price", 0)
+                shares = pos_data.get("our_shares", 0)
+                realized_pnl = (our_price - entry_price) * shares if shares else 0
+                net_pnl = realized_pnl - poly_fee - slippage_cost
 
-        duration = time.time() - start
-        await self._log_scan("prices", 0, 0, prices_updated, positions_resolved, duration, errors)
+                try:
+                    await self._db.execute(
+                        """UPDATE shadow_positions
+                        SET status = 'closed', exit_price = ?, closed_at = datetime('now'),
+                            gross_pnl = ?, net_pnl = ?, exit_delay_ms = ?
+                        WHERE wallet_id = ? AND condition_id = ? AND outcome_index = ?
+                              AND status = 'open' AND mode_id = ?""",
+                        (our_price, realized_pnl, net_pnl, delay_ms,
+                         wallet_id, condition_id, outcome_index, mode_id),
+                    )
+                    await self._db.commit()
+                except Exception as e:
+                    logger.error(f"Failed to close shadow position: {e}")
 
-        return {
-            "prices_updated": prices_updated,
-            "positions_resolved": positions_resolved,
-            "duration_seconds": round(duration, 2),
-            "errors": errors,
-        }
+                self._wallet_positions.get((their_address, mode_id), {}).pop(pos_key, None)
+        else:
+            event_type = "UNKNOWN"
 
-    # ── Full cycle ───────────────────────────────────────────────
-
-    async def full_cycle(self) -> dict:
-        """Run scan_all_wallets + update_prices + save_snapshot."""
-        scan_result = await self.scan_all_wallets()
-        price_result = await self.update_prices()
-        await self._save_snapshot()
-
-        return {
-            "scan": scan_result,
-            "prices": price_result,
-        }
-
-    # ── Snapshot ─────────────────────────────────────────────────
-
-    async def _save_snapshot(self):
-        db = await self._db()
+        # Log paired trade to copy_feed
+        copy_feed_id = None
         try:
-            # Global snapshot
-            row = await db.execute_fetchall("""
-                SELECT
-                    COUNT(*) as total_wallets,
-                    SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) as active_wallets,
-                    SUM(sim_total_pnl) as total_sim_pnl,
-                    SUM(sim_realized_pnl) as total_realized,
-                    SUM(sim_unrealized_pnl) as total_unrealized,
-                    SUM(sim_open_positions) as open_positions,
-                    SUM(sim_total_trades) as total_trades
-                FROM wallets
-            """)
-            if row:
-                r = row[0]
-                total_trades = r["total_trades"] or 0
-                wins = 0
-                wr_row = await db.execute_fetchall(
-                    "SELECT SUM(sim_wins) as w FROM wallets"
-                )
-                if wr_row:
-                    wins = wr_row[0]["w"] or 0
-                overall_wr = (wins / total_trades * 100) if total_trades > 0 else 0
-
-                # Best/worst wallet
-                best = await db.execute_fetchall(
-                    "SELECT id FROM wallets ORDER BY sim_total_pnl DESC LIMIT 1"
-                )
-                worst = await db.execute_fetchall(
-                    "SELECT id FROM wallets ORDER BY sim_total_pnl ASC LIMIT 1"
-                )
-
-                await db.execute(
-                    """INSERT INTO snapshots
-                    (total_wallets, active_wallets, total_sim_pnl, total_realized,
-                     total_unrealized, open_positions, total_trades, overall_win_rate,
-                     best_wallet_id, worst_wallet_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        r["total_wallets"],
-                        r["active_wallets"],
-                        r["total_sim_pnl"] or 0,
-                        r["total_realized"] or 0,
-                        r["total_unrealized"] or 0,
-                        r["open_positions"] or 0,
-                        total_trades,
-                        overall_wr,
-                        best[0]["id"] if best else None,
-                        worst[0]["id"] if worst else None,
-                    ),
-                )
-
-            # Per-wallet snapshots
-            wallets = await db.execute_fetchall(
-                "SELECT id, sim_total_pnl, sim_open_positions, sim_win_rate FROM wallets WHERE is_active = 1"
-            )
-            for w in wallets:
-                await db.execute(
-                    """INSERT INTO wallet_snapshots (wallet_id, sim_pnl, open_positions, win_rate)
-                    VALUES (?, ?, ?, ?)""",
-                    (w["id"], w["sim_total_pnl"] or 0, w["sim_open_positions"] or 0, w["sim_win_rate"] or 0),
-                )
-
-            await db.commit()
-        finally:
-            await db.close()
-
-    # ── Wallet stats update ──────────────────────────────────────
-
-    async def _update_wallet_stats(self, db: aiosqlite.Connection):
-        """Recompute sim stats for all wallets from trade data."""
-        wallets = await db.execute_fetchall("SELECT id FROM wallets")
-        for w in wallets:
-            wid = w["id"]
-            stats = await db.execute_fetchall(
-                """SELECT
-                    COUNT(*) as total_trades,
-                    SUM(CASE WHEN sim_status = 'won' THEN 1 ELSE 0 END) as wins,
-                    SUM(CASE WHEN sim_status = 'lost' THEN 1 ELSE 0 END) as losses,
-                    SUM(CASE WHEN sim_status IN ('won','lost','sold') THEN sim_pnl ELSE 0 END) as realized,
-                    SUM(CASE WHEN sim_status = 'open' THEN sim_pnl ELSE 0 END) as unrealized,
-                    SUM(CASE WHEN sim_status = 'open' THEN 1 ELSE 0 END) as open_pos
-                FROM trades WHERE wallet_id = ? AND side = 'BUY'""",
-                (wid,),
-            )
-            if stats:
-                s = stats[0]
-                total = s["total_trades"] or 0
-                wins = s["wins"] or 0
-                losses = s["losses"] or 0
-                realized = s["realized"] or 0
-                unrealized = s["unrealized"] or 0
-                open_pos = s["open_pos"] or 0
-                decided = wins + losses
-                wr = (wins / decided * 100) if decided > 0 else 0
-
-                await db.execute(
-                    """UPDATE wallets SET
-                    sim_total_pnl = ?, sim_realized_pnl = ?, sim_unrealized_pnl = ?,
-                    sim_total_trades = ?, sim_wins = ?, sim_losses = ?,
-                    sim_win_rate = ?, sim_open_positions = ?
-                    WHERE id = ?""",
-                    (realized + unrealized, realized, unrealized, total, wins, losses, wr, open_pos, wid),
-                )
-
-    # ── Scan log ─────────────────────────────────────────────────
-
-    async def _log_scan(
-        self, scan_type: str, wallets_scanned: int, new_trades: int,
-        prices_updated: int, positions_resolved: int, duration: float, errors: list
-    ):
-        db = await self._db()
-        try:
-            await db.execute(
-                """INSERT INTO scan_log
-                (scan_type, wallets_scanned, new_trades, prices_updated,
-                 positions_resolved, duration_seconds, errors)
-                VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            cursor = await self._db.execute(
+                """INSERT OR IGNORE INTO copy_feed
+                (wallet_id, wallet_address, wallet_username, tx_hash, event_type,
+                 side, direction, condition_id, market_slug, market_title,
+                 their_price, their_size, their_timestamp_ms,
+                 our_price, our_size, our_shares, poly_fee, slippage,
+                 delay_ms, realized_pnl, net_pnl, executed_at_ms, filter_verdict,
+                 score_trade, score_wallet, trade_tier, score_breakdown, mode_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    scan_type,
-                    wallets_scanned,
-                    new_trades,
-                    prices_updated,
-                    positions_resolved,
-                    round(duration, 2),
-                    json.dumps(errors) if errors else None,
+                    wallet_id, their_address, wallet_username, tx_hash, event_type,
+                    side, direction, condition_id, market_slug, market_title,
+                    their_price, their_size, self._parse_timestamp_ms(trade),
+                    our_price, our_size, our_shares, poly_fee, slippage_cost,
+                    delay_ms, realized_pnl, net_pnl, execution_time_ms, filter_verdict,
+                    score_data["score_trade"] if score_data else None,
+                    score_data["score_wallet"] if score_data else None,
+                    score_data["trade_tier"] if score_data else None,
+                    json.dumps(score_data) if score_data else None,
+                    mode_id,
                 ),
             )
-            await db.commit()
-        finally:
-            await db.close()
+            await self._db.commit()
+            copy_feed_id = cursor.lastrowid
+        except Exception as e:
+            logger.error(f"Failed to log copy_feed: {e}")
 
-    # ── Dashboard data ───────────────────────────────────────────
+        self._trades_today += 1
+        logger.info(
+            f"COPY [{mode_id}] {event_type} | {wallet_username or their_address[:10]} | "
+            f"{side} {direction} | them ${their_size:.0f} -> us ${our_size:.2f} @{our_price:.3f} | "
+            f"delay={delay_ms}ms | filters={filter_verdict} | "
+            f"score_t={score_data['score_trade'] if score_data else '?'} tier={score_data['trade_tier'] if score_data else '?'}"
+        )
+        return copy_feed_id
 
-    async def get_dashboard_data(self) -> dict:
-        """Return everything the frontend needs in one call."""
-        db = await self._db()
-        try:
-            # Global stats
-            global_row = await db.execute_fetchall("""
-                SELECT
-                    SUM(sim_total_pnl) as total_pnl,
-                    SUM(sim_realized_pnl) as realized,
-                    SUM(sim_unrealized_pnl) as unrealized,
-                    SUM(sim_total_trades) as total_trades,
-                    SUM(sim_wins) as wins,
-                    SUM(sim_losses) as losses,
-                    SUM(sim_open_positions) as open_positions,
-                    COUNT(*) as total_wallets,
-                    SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) as active_wallets
-                FROM wallets
-            """)
-            g = global_row[0] if global_row else {}
-            total_trades = g["total_trades"] or 0
-            wins = g["wins"] or 0
-            losses = g["losses"] or 0
-            decided = wins + losses
-            win_rate = (wins / decided * 100) if decided > 0 else 0
+    # ── Price Refresh ─────────────────────────────────────────
 
-            # Best/worst wallet
-            best = await db.execute_fetchall(
-                "SELECT id, username, address, sim_total_pnl FROM wallets ORDER BY sim_total_pnl DESC LIMIT 1"
-            )
-            worst = await db.execute_fetchall(
-                "SELECT id, username, address, sim_total_pnl FROM wallets ORDER BY sim_total_pnl ASC LIMIT 1"
-            )
+    async def refresh_prices(self) -> int:
+        """Refresh current_price on all open shadow positions via Gamma API."""
+        await self._ensure_client()
+        await self._ensure_db()
 
-            global_stats = {
-                "total_pnl": g["total_pnl"] or 0,
-                "realized": g["realized"] or 0,
-                "unrealized": g["unrealized"] or 0,
-                "total_trades": total_trades,
-                "wins": wins,
-                "losses": losses,
-                "win_rate": round(win_rate, 2),
-                "open_positions": g["open_positions"] or 0,
-                "total_wallets": g["total_wallets"] or 0,
-                "active_wallets": g["active_wallets"] or 0,
-                "best_wallet": dict(best[0]) if best else None,
-                "worst_wallet": dict(worst[0]) if worst else None,
-            }
+        async with self._db.execute(
+            "SELECT DISTINCT market_slug FROM shadow_positions WHERE status = 'open' AND market_slug IS NOT NULL"
+        ) as cursor:
+            slugs = [row["market_slug"] for row in await cursor.fetchall()]
 
-            # Wallets sorted by sim_pnl
-            wallets_rows = await db.execute_fetchall(
-                """SELECT id, address, username, score, csv_win_rate, csv_pnl, csv_volume,
-                   alloc_usd, is_active, sim_total_pnl, sim_realized_pnl, sim_unrealized_pnl,
-                   sim_total_trades, sim_wins, sim_losses, sim_win_rate, sim_open_positions,
-                   last_scanned, profile_url
-                FROM wallets ORDER BY sim_total_pnl DESC"""
-            )
-            wallets = [dict(w) for w in wallets_rows]
+        if not slugs:
+            return 0
 
-            # Recent trades
-            recent_rows = await db.execute_fetchall(
-                """SELECT t.*, w.username as wallet_username
-                FROM trades t JOIN wallets w ON t.wallet_id = w.id
-                ORDER BY t.detected_at DESC LIMIT 50"""
-            )
-            recent_trades = [dict(r) for r in recent_rows]
-
-            # Snapshots (last 168 hours = 7 days)
-            snap_rows = await db.execute_fetchall(
-                "SELECT * FROM snapshots ORDER BY timestamp DESC LIMIT 168"
-            )
-            snapshots = [dict(s) for s in snap_rows]
-            snapshots.reverse()
-
-            # Scan log
-            log_rows = await db.execute_fetchall(
-                "SELECT * FROM scan_log ORDER BY timestamp DESC LIMIT 20"
-            )
-            scan_log = [dict(l) for l in log_rows]
-
-            return {
-                "global_stats": global_stats,
-                "wallets": wallets,
-                "recent_trades": recent_trades,
-                "snapshots": snapshots,
-                "scan_log": scan_log,
-            }
-        finally:
-            await db.close()
-
-    # ── Wallet detail ────────────────────────────────────────────
-
-    async def get_wallet_detail(self, wallet_id: int) -> dict:
-        """Deep dive into one wallet."""
-        db = await self._db()
-        try:
-            # Wallet info
-            w_rows = await db.execute_fetchall(
-                "SELECT * FROM wallets WHERE id = ?", (wallet_id,)
-            )
-            if not w_rows:
-                return {"error": "Wallet not found"}
-            wallet = dict(w_rows[0])
-
-            # All trades
-            trade_rows = await db.execute_fetchall(
-                """SELECT * FROM trades WHERE wallet_id = ?
-                ORDER BY original_timestamp DESC""",
-                (wallet_id,),
-            )
-            trades = [dict(t) for t in trade_rows]
-
-            # Wallet snapshots
-            snap_rows = await db.execute_fetchall(
-                """SELECT * FROM wallet_snapshots WHERE wallet_id = ?
-                ORDER BY timestamp DESC LIMIT 168""",
-                (wallet_id,),
-            )
-            snapshots = [dict(s) for s in snap_rows]
-            snapshots.reverse()
-
-            # P&L breakdown
-            best_trade = None
-            worst_trade = None
-            for t in trades:
-                if t["side"] != "BUY":
+        updated = 0
+        for slug in slugs:
+            try:
+                resp = await self._client.get(
+                    f"{GAMMA_API}/markets",
+                    params={"slug": slug, "limit": 1},
+                )
+                resp.raise_for_status()
+                markets = resp.json()
+                if not markets:
                     continue
-                pnl = t["sim_pnl"] or 0
-                if best_trade is None or pnl > (best_trade["sim_pnl"] or 0):
-                    best_trade = t
-                if worst_trade is None or pnl < (worst_trade["sim_pnl"] or 0):
-                    worst_trade = t
 
-            # Avg trade size
-            buy_trades = [t for t in trades if t["side"] == "BUY"]
-            avg_size = sum(t["sim_size"] or 0 for t in buy_trades) / len(buy_trades) if buy_trades else 0
+                market = markets[0] if isinstance(markets, list) else markets
+                outcome_prices = market.get("outcomePrices")
+                if not outcome_prices:
+                    continue
 
-            # Win/loss streaks
-            results = []
-            for t in sorted(buy_trades, key=lambda x: x["original_timestamp"] or 0):
-                if t["sim_status"] == "won":
-                    results.append("W")
-                elif t["sim_status"] == "lost":
-                    results.append("L")
-            max_win_streak = max_loss_streak = current = 0
-            current_type = None
-            for r in results:
-                if r == current_type:
-                    current += 1
+                if isinstance(outcome_prices, str):
+                    prices = json.loads(outcome_prices)
                 else:
-                    current_type = r
-                    current = 1
-                if r == "W":
-                    max_win_streak = max(max_win_streak, current)
-                else:
-                    max_loss_streak = max(max_loss_streak, current)
+                    prices = outcome_prices
 
-            return {
-                "wallet": wallet,
-                "trades": trades,
-                "snapshots": snapshots,
-                "best_trade": best_trade,
-                "worst_trade": worst_trade,
-                "avg_trade_size": round(avg_size, 2),
-                "max_win_streak": max_win_streak,
-                "max_loss_streak": max_loss_streak,
-            }
-        finally:
-            await db.close()
+                for idx, price in enumerate(prices):
+                    price_f = float(price)
+                    await self._db.execute(
+                        """UPDATE shadow_positions
+                        SET current_price = ?,
+                            gross_pnl = (? - our_entry_price) * our_shares,
+                            net_pnl = (? - our_entry_price) * our_shares - poly_fee - slippage
+                        WHERE market_slug = ? AND outcome_index = ? AND status = 'open'""",
+                        (price_f, price_f, price_f, slug, idx),
+                    )
+                    updated += 1
 
-    # ── Query helpers for API endpoints ──────────────────────────
+                await self._db.commit()
+            except Exception as e:
+                logger.debug(f"Price refresh failed for {slug}: {e}")
 
-    async def get_all_wallets(self) -> list[dict]:
-        db = await self._db()
-        try:
-            rows = await db.execute_fetchall(
-                """SELECT id, address, username, score, csv_win_rate, csv_pnl, csv_volume,
-                   alloc_usd, is_active, sim_total_pnl, sim_realized_pnl, sim_unrealized_pnl,
-                   sim_total_trades, sim_wins, sim_losses, sim_win_rate, sim_open_positions,
-                   last_scanned, profile_url
-                FROM wallets ORDER BY sim_total_pnl DESC"""
-            )
-            return [dict(r) for r in rows]
-        finally:
-            await db.close()
+        logger.info(f"Price refresh: updated {updated} position groups")
+        return updated
 
-    async def get_all_trades(self, limit: int = 200, offset: int = 0,
-                              wallet_id: int | None = None, status: str | None = None) -> list[dict]:
-        db = await self._db()
-        try:
-            query = """SELECT t.*, w.username as wallet_username
-                FROM trades t JOIN wallets w ON t.wallet_id = w.id
-                WHERE 1=1"""
-            params: list = []
-            if wallet_id:
-                query += " AND t.wallet_id = ?"
-                params.append(wallet_id)
-            if status:
-                query += " AND t.sim_status = ?"
-                params.append(status)
-            query += " ORDER BY t.detected_at DESC LIMIT ? OFFSET ?"
-            params.extend([limit, offset])
-            rows = await db.execute_fetchall(query, params)
-            return [dict(r) for r in rows]
-        finally:
-            await db.close()
+    # ── Status ────────────────────────────────────────────────
 
-    async def get_recent_trades(self, limit: int = 50) -> list[dict]:
-        db = await self._db()
-        try:
-            rows = await db.execute_fetchall(
-                """SELECT t.*, w.username as wallet_username
-                FROM trades t JOIN wallets w ON t.wallet_id = w.id
-                ORDER BY t.detected_at DESC LIMIT ?""",
-                (limit,),
-            )
-            return [dict(r) for r in rows]
-        finally:
-            await db.close()
-
-    async def get_snapshots(self, limit: int = 168) -> list[dict]:
-        db = await self._db()
-        try:
-            rows = await db.execute_fetchall(
-                "SELECT * FROM snapshots ORDER BY timestamp DESC LIMIT ?", (limit,)
-            )
-            result = [dict(r) for r in rows]
-            result.reverse()
-            return result
-        finally:
-            await db.close()
-
-    async def get_scan_log(self, limit: int = 20) -> list[dict]:
-        db = await self._db()
-        try:
-            rows = await db.execute_fetchall(
-                "SELECT * FROM scan_log ORDER BY timestamp DESC LIMIT ?", (limit,)
-            )
-            return [dict(r) for r in rows]
-        finally:
-            await db.close()
-
-    async def get_stats(self) -> dict:
-        db = await self._db()
-        try:
-            row = await db.execute_fetchall("""
-                SELECT
-                    SUM(sim_total_pnl) as total_pnl,
-                    SUM(sim_total_trades) as total_trades,
-                    SUM(sim_wins) as wins,
-                    SUM(sim_losses) as losses,
-                    SUM(sim_open_positions) as open_positions,
-                    COUNT(*) as total_wallets,
-                    SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) as active_wallets
-                FROM wallets
-            """)
-            g = row[0] if row else {}
-            decided = (g["wins"] or 0) + (g["losses"] or 0)
-            win_rate = ((g["wins"] or 0) / decided * 100) if decided > 0 else 0
-
-            # Last scan time
-            last_scan = await db.execute_fetchall(
-                "SELECT timestamp FROM scan_log ORDER BY timestamp DESC LIMIT 1"
-            )
-            return {
-                "total_pnl": g["total_pnl"] or 0,
-                "total_trades": g["total_trades"] or 0,
-                "win_rate": round(win_rate, 2),
-                "open_positions": g["open_positions"] or 0,
-                "active_wallets": g["active_wallets"] or 0,
-                "total_wallets": g["total_wallets"] or 0,
-                "last_scan": last_scan[0]["timestamp"] if last_scan else None,
-            }
-        finally:
-            await db.close()
+    def get_status(self) -> dict:
+        uptime = time.monotonic() - self._start_time if self._start_time else 0
+        return {
+            "running": self._loop_running,
+            "cycle_count": self._cycle_count,
+            "last_cycle_ms": round(self._last_cycle_ms, 1),
+            "worst_cycle_ms": round(self._worst_cycle_ms, 1),
+            "trades_today": self._trades_today,
+            "uptime_seconds": round(uptime, 0),
+            "wallets_loaded": len(self._wallet_addresses),
+        }
